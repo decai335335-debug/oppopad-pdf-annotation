@@ -90,21 +90,31 @@
   touch-action: none;
 }
 
+.oppopad-annotation-surface {
+  height: var(--oppopad-surface-height, 100%);
+  margin: 0 auto;
+  position: relative;
+  width: var(--oppopad-surface-width, 1180px);
+}
+
 .oppopad-annotation-stage {
   box-sizing: border-box;
-  margin: 0 auto;
-  min-height: var(--oppopad-stage-height, 100%);
-  position: relative;
+  height: var(--oppopad-stage-height, 1600px);
+  left: 0;
+  position: absolute;
+  top: 0;
   touch-action: none;
+  transform: scale(var(--oppopad-scale, 1));
   transform-origin: left top;
   width: var(--oppopad-page-width, 1180px);
-  zoom: var(--oppopad-zoom, 1);
 }
 
 .oppopad-markdown-content {
   box-sizing: border-box;
+  font-size: 16px;
+  line-height: 1.6;
   min-height: 100%;
-  padding: var(--file-margins);
+  padding: 48px 64px;
   position: relative;
   z-index: 1;
 }

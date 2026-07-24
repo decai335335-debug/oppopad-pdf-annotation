@@ -18,6 +18,7 @@ const SYNC_FOLDER = "OPPO Pad Annotations";
 const SYNC_FILE = `${SYNC_FOLDER}/annotations.json`;
 const SAVE_DELAY_MS = 350;
 const LOGICAL_PAGE_WIDTH = 1180;
+const MIN_LOGICAL_PAGE_HEIGHT = 1600;
 const CANVAS_TILE_HEIGHT = 2048;
 
 type DrawingTool = "pen" | "highlighter";
@@ -260,7 +261,9 @@ class MarkdownAnnotationView extends ItemView {
   private saveTimer: number | null = null;
   private scrollEl: HTMLElement | null = null;
   private sidebarCloseFrame: number | null = null;
+  private stageHeight = 1;
   private stageEl: HTMLElement | null = null;
+  private surfaceEl: HTMLElement | null = null;
   private lastPenActivityAt = 0;
   private lastStylusToggleAt = 0;
   private stylusButtonPressed = false;
@@ -336,7 +339,8 @@ class MarkdownAnnotationView extends ItemView {
     this.createToolbarButton("file-text", "Return to Markdown", () => void this.returnToMarkdown());
 
     this.scrollEl = this.contentEl.createDiv({ cls: "oppopad-annotation-scroll" });
-    this.stageEl = this.scrollEl.createDiv({ cls: "oppopad-annotation-stage" });
+    this.surfaceEl = this.scrollEl.createDiv({ cls: "oppopad-annotation-surface" });
+    this.stageEl = this.surfaceEl.createDiv({ cls: "oppopad-annotation-stage" });
     this.stageEl.style.setProperty("--oppopad-page-width", `${LOGICAL_PAGE_WIDTH}px`);
     this.markdownEl = this.stageEl.createDiv({ cls: "markdown-preview-view markdown-rendered oppopad-markdown-content" });
     this.liveStrokeSvg = this.stageEl.createSvg("svg", {
@@ -707,9 +711,8 @@ class MarkdownAnnotationView extends ItemView {
           const elapsed = Math.max(4, now - this.touchLastAt);
           const dx = event.clientX - previous.x;
           const dy = event.clientY - previous.y;
-          const effectiveZoom = this.getEffectiveZoom();
-          this.scrollEl.scrollLeft -= dx / effectiveZoom;
-          this.scrollEl.scrollTop -= dy / effectiveZoom;
+          this.scrollEl.scrollLeft -= dx;
+          this.scrollEl.scrollTop -= dy;
           this.touchVelocity.x = this.touchVelocity.x * 0.68 + (dx / elapsed) * 0.32;
           this.touchVelocity.y = this.touchVelocity.y * 0.68 + (dy / elapsed) * 0.32;
           this.touchLastAt = now;
@@ -720,11 +723,10 @@ class MarkdownAnnotationView extends ItemView {
         const afterDistance = touchMapDistance(this.trackedTouches);
         const beforeCenter = touchMapCenter(before);
         const afterCenter = touchMapCenter(this.trackedTouches);
-        const effectiveZoom = this.getEffectiveZoom();
-        this.scrollEl.scrollLeft -= (afterCenter.x - beforeCenter.x) / effectiveZoom;
-        this.scrollEl.scrollTop -= (afterCenter.y - beforeCenter.y) / effectiveZoom;
+        this.scrollEl.scrollLeft -= afterCenter.x - beforeCenter.x;
+        this.scrollEl.scrollTop -= afterCenter.y - beforeCenter.y;
         if (beforeDistance > 0 && afterDistance > 0) {
-          this.setZoom(this.zoom * (afterDistance / beforeDistance));
+          this.setZoomAround(this.zoom * (afterDistance / beforeDistance), afterCenter);
         }
       }
       return;
@@ -888,9 +890,8 @@ class MarkdownAnnotationView extends ItemView {
       }
       const elapsed = Math.min(32, Math.max(1, time - previousTime));
       previousTime = time;
-      const effectiveZoom = this.getEffectiveZoom();
-      scroll.scrollLeft -= (this.touchVelocity.x * elapsed) / effectiveZoom;
-      scroll.scrollTop -= (this.touchVelocity.y * elapsed) / effectiveZoom;
+      scroll.scrollLeft -= this.touchVelocity.x * elapsed;
+      scroll.scrollTop -= this.touchVelocity.y * elapsed;
       const decay = Math.pow(0.94, elapsed / 16.67);
       this.touchVelocity.x *= decay;
       this.touchVelocity.y *= decay;
@@ -1040,13 +1041,36 @@ class MarkdownAnnotationView extends ItemView {
     this.applyZoom();
   }
 
+  private setZoomAround(value: number, focalPoint: { x: number; y: number }): void {
+    const stage = this.stageEl;
+    const scroll = this.scrollEl;
+    if (!stage || !scroll) {
+      this.setZoom(value);
+      return;
+    }
+    const oldScale = this.getEffectiveZoom();
+    const oldRect = stage.getBoundingClientRect();
+    const logicalX = (focalPoint.x - oldRect.left) / Math.max(0.1, oldScale);
+    const logicalY = (focalPoint.y - oldRect.top) / Math.max(0.1, oldScale);
+    this.setZoom(value);
+    const newScale = this.getEffectiveZoom();
+    const newRect = stage.getBoundingClientRect();
+    scroll.scrollLeft += newRect.left + logicalX * newScale - focalPoint.x;
+    scroll.scrollTop += newRect.top + logicalY * newScale - focalPoint.y;
+  }
+
   private getEffectiveZoom(): number {
     return this.fitZoom * this.zoom;
   }
 
   private applyZoom(): void {
+    const scale = this.getEffectiveZoom();
     if (this.stageEl) {
-      this.stageEl.style.setProperty("--oppopad-zoom", String(this.getEffectiveZoom()));
+      this.stageEl.style.setProperty("--oppopad-scale", String(scale));
+    }
+    if (this.surfaceEl) {
+      this.surfaceEl.style.setProperty("--oppopad-surface-width", `${LOGICAL_PAGE_WIDTH * scale}px`);
+      this.surfaceEl.style.setProperty("--oppopad-surface-height", `${this.stageHeight * scale}px`);
     }
   }
 
@@ -1075,12 +1099,18 @@ class MarkdownAnnotationView extends ItemView {
     }
     this.fitZoom = Math.min(1, Math.max(0.1, scroll.clientWidth / LOGICAL_PAGE_WIDTH));
     this.applyZoom();
-    const height = Math.max(
-      scroll.clientHeight / this.getEffectiveZoom(),
-      this.markdownEl?.scrollHeight ?? 0,
-      1
+    const annotationHeight = this.strokes.reduce(
+      (maximum, stroke) =>
+        stroke.points.reduce(
+          (strokeMaximum, point) => Math.max(strokeMaximum, point.y + stroke.width + 96),
+          maximum
+        ),
+      0
     );
+    const height = Math.max(MIN_LOGICAL_PAGE_HEIGHT, this.markdownEl?.scrollHeight ?? 0, annotationHeight);
+    this.stageHeight = height;
     stage.style.setProperty("--oppopad-stage-height", `${height}px`);
+    this.applyZoom();
     if (this.liveStrokeSvg) {
       this.liveStrokeSvg.setAttribute("height", String(height));
       this.liveStrokeSvg.setAttribute("viewBox", `0 0 ${LOGICAL_PAGE_WIDTH} ${height}`);

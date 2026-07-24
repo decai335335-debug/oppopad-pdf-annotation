@@ -84,6 +84,8 @@ Version 1.4.0 replaces the custom line renderer with the MIT-licensed `perfect-f
 
 Version 1.5.0 renders the in-progress stroke in a dedicated live SVG layer and commits it to the tiled canvas only on pen-up. It also reduces tip lag, preserves the final pressure on pen lift, rejects cancelled fragments, and avoids sidebar work during every pen sample.
 
+Version 1.6.0 locks Markdown and ink to a 1180-pixel logical page with a stable minimum height and fixed text metrics. Pinch zoom is now a camera-only CSS transform, so zoom, orientation, and device viewport size never rewrite annotation coordinates. Touch pan and inertia also operate in screen pixels for consistent motion at every zoom level.
+
 ---
 
 ## 中文说明
