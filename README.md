@@ -13,10 +13,10 @@ This is an independent community project and is not affiliated with, endorsed by
 - Fixed landscape-width document layout, so rotation does not reflow Markdown underneath existing ink.
 - Stylus input writes or erases on the annotation layer.
 - One-finger touch pans the document without creating ink.
-- Vertical one-finger reading uses native WebView scrolling for normal Markdown-style inertia.
+- One-finger reading uses velocity-sampled kinetic scrolling while the drawing surface keeps full control of pen events.
 - Two-finger touch pans and zooms the rendered Markdown and handwriting together.
 - Uses pressure, tilt, and high-frequency coalesced pointer samples when Android WebView exposes them.
-- Stylus side-button, reported double-click, or two quick pen-tip taps switches between pen and eraser.
+- OPPO Pencil body double-tap switches between pen and eraser only when ColorOS exposes it as a stylus button event to Obsidian WebView.
 - Undo, clear, zoom, and return-to-Markdown toolbar actions.
 - Handwriting is saved per Markdown file in `OPPO Pad Annotations/annotations.json` inside the vault and follows file renames.
 - The same annotations load on desktop when that vault folder is synchronized.
@@ -72,11 +72,15 @@ Licensed under the [MIT License](LICENSE).
 
 Version 1.0.0 was derived from Pdftion by Murat. Version 1.1.0 replaces the PDF implementation with a focused Markdown handwriting view maintained by [decai335335-debug](https://github.com/decai335335-debug).
 
+The handwriting outline renderer uses [`perfect-freehand`](https://github.com/steveruizok/perfect-freehand). See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
 Version 1.1.1 hardens the Android view lifecycle, reuses the current Markdown tab on mobile, and caps canvas memory usage to prevent WebView crashes.
 
 Version 1.2.0 adds the pen/highlighter controls, smoother curves, manual touch pan/pinch handling, and stronger suppression of Obsidian's edge-pane gestures while writing.
 
 Version 1.3.0 adds a fixed landscape-width layout, vault-synced annotation storage, tiled high-resolution canvases, frame-batched drawing, and automatic sidebar closing during pen/touch gestures.
+
+Version 1.4.0 replaces the custom line renderer with the MIT-licensed `perfect-freehand` outline engine used by established Obsidian drawing plugins, removes pen-tip double-tap switching, and adds kinetic touch scrolling without allowing the browser to cancel pen strokes.
 
 ---
 

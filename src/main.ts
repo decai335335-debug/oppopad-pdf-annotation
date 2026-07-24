@@ -9,6 +9,7 @@ import {
   normalizePath,
   setIcon
 } from "obsidian";
+import { getStroke } from "perfect-freehand";
 import type { ViewStateResult } from "obsidian";
 
 const VIEW_TYPE = "oppopad-markdown-annotation";
@@ -248,9 +249,6 @@ class MarkdownAnnotationView extends ItemView {
   private currentStroke: InkStroke | null = null;
   private colorInput: HTMLInputElement | null = null;
   private filePath = "";
-  private lastPenTapAt = 0;
-  private lastPenTapPosition = { x: 0, y: 0 };
-  private lastStrokeWasTap = false;
   private markdownComponent: Component | null = null;
   private markdownEl: HTMLElement | null = null;
   private renderGeneration = 0;
@@ -260,17 +258,20 @@ class MarkdownAnnotationView extends ItemView {
   private scrollEl: HTMLElement | null = null;
   private sidebarCloseFrame: number | null = null;
   private stageEl: HTMLElement | null = null;
+  private lastPenActivityAt = 0;
+  private lastStylusToggleAt = 0;
+  private stylusButtonPressed = false;
   private strokes: InkStroke[] = [];
   private tool: InkTool = "pen";
   private toolbarEl: HTMLElement | null = null;
   private trackedTouches = new Map<number, { x: number; y: number }>();
-  private touchMode: "pending" | "horizontal" | "vertical" | null = null;
+  private touchInertiaFrame: number | null = null;
+  private touchLastAt = 0;
+  private touchVelocity = { x: 0, y: 0 };
   private fitZoom = 1;
   private zoom = 1;
   private opacityInput: HTMLInputElement | null = null;
   private opacityValueEl: HTMLElement | null = null;
-  private penDownPosition = { x: 0, y: 0 };
-  private penMoved = false;
   private preferences: ToolPreferences;
   private widthInput: HTMLInputElement | null = null;
   private widthValueEl: HTMLElement | null = null;
@@ -340,10 +341,25 @@ class MarkdownAnnotationView extends ItemView {
     this.registerDomEvent(this.stageEl, "pointermove", (event) => this.onPointerMove(event), { capture: true });
     this.registerDomEvent(this.stageEl, "pointerup", (event) => this.onPointerUp(event), { capture: true });
     this.registerDomEvent(this.stageEl, "pointercancel", (event) => this.onPointerUp(event), { capture: true });
-    const suppressSidebarTouchGesture = (event: TouchEvent): void => {
-      if (event.touches.length >= 2 || this.touchMode === "horizontal") {
+    this.registerDomEvent(this.stageEl, "contextmenu", (event) => {
+      if (performance.now() - this.lastPenActivityAt < 900) {
         event.preventDefault();
+        event.stopImmediatePropagation();
+        this.toggleFromStylusHardware();
       }
+    }, { capture: true });
+    this.registerDomEvent(window, "keydown", (event) => {
+      if (
+        performance.now() - this.lastPenActivityAt < 900 &&
+        ["BrowserBack", "BrowserForward", "ContextMenu"].includes(event.key)
+      ) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        this.toggleFromStylusHardware();
+      }
+    }, { capture: true });
+    const suppressSidebarTouchGesture = (event: TouchEvent): void => {
+      event.preventDefault();
       event.stopImmediatePropagation();
     };
     this.registerDomEvent(this.stageEl, "touchstart", suppressSidebarTouchGesture, {
@@ -393,6 +409,7 @@ class MarkdownAnnotationView extends ItemView {
       window.cancelAnimationFrame(this.sidebarCloseFrame);
       this.sidebarCloseFrame = null;
     }
+    this.stopTouchInertia();
     if (this.saveTimer !== null) {
       window.clearTimeout(this.saveTimer);
       this.saveTimer = null;
@@ -612,16 +629,14 @@ class MarkdownAnnotationView extends ItemView {
   private onPointerDown(event: PointerEvent): void {
     if (event.pointerType === "touch") {
       this.keepSidebarsClosed();
+      this.stopTouchInertia();
+      event.preventDefault();
       event.stopImmediatePropagation();
       this.trackedTouches.set(event.pointerId, { x: event.clientX, y: event.clientY });
-      if (this.trackedTouches.size === 1) {
-        this.touchMode = "pending";
-      } else {
-        this.touchMode = null;
-        event.preventDefault();
-        for (const pointerId of this.trackedTouches.keys()) {
-          this.stageEl?.setPointerCapture(pointerId);
-        }
+      this.touchLastAt = performance.now();
+      this.touchVelocity = { x: 0, y: 0 };
+      for (const pointerId of this.trackedTouches.keys()) {
+        this.stageEl?.setPointerCapture(pointerId);
       }
       return;
     }
@@ -630,38 +645,15 @@ class MarkdownAnnotationView extends ItemView {
       return;
     }
 
+    this.lastPenActivityAt = performance.now();
     this.keepSidebarsClosed();
     event.preventDefault();
     event.stopImmediatePropagation();
 
-    const now = performance.now();
-    const isSideButton =
-      event.button === 2 ||
-      event.button === 5 ||
-      event.button === 6 ||
-      (event.buttons & 2) !== 0 ||
-      (event.buttons & 32) !== 0 ||
-      (event.buttons & 64) !== 0;
-    const isDoubleTap =
-      event.detail >= 2 ||
-      (now - this.lastPenTapAt < 380 &&
-        Math.hypot(
-          event.clientX - this.lastPenTapPosition.x,
-          event.clientY - this.lastPenTapPosition.y
-        ) < 36);
-    if (isSideButton || isDoubleTap) {
-      if (isDoubleTap && this.lastStrokeWasTap && this.strokes.at(-1)?.points.length === 2) {
-        this.strokes.pop();
-        this.scheduleSave();
-        this.redraw();
-      }
-      this.lastPenTapAt = 0;
-      this.togglePenEraser();
+    if (this.handleStylusButton(event)) {
       return;
     }
 
-    this.penDownPosition = { x: event.clientX, y: event.clientY };
-    this.penMoved = false;
     this.stageEl?.setPointerCapture(event.pointerId);
     const point = this.getInkPoint(event);
     if (this.tool === "eraser") {
@@ -688,25 +680,26 @@ class MarkdownAnnotationView extends ItemView {
         return;
       }
       this.keepSidebarsClosed();
+      event.preventDefault();
       event.stopImmediatePropagation();
       const before = new Map(this.trackedTouches);
       this.trackedTouches.set(event.pointerId, { x: event.clientX, y: event.clientY });
       if (this.trackedTouches.size === 1) {
         const previous = before.get(event.pointerId);
-        if (previous && this.touchMode === "pending") {
+        if (previous && this.scrollEl) {
+          const now = performance.now();
+          const elapsed = Math.max(4, now - this.touchLastAt);
           const dx = event.clientX - previous.x;
           const dy = event.clientY - previous.y;
-          if (Math.hypot(dx, dy) >= 4) {
-            this.touchMode = Math.abs(dx) > Math.abs(dy) * 1.15 ? "horizontal" : "vertical";
-          }
-        }
-        if (previous && this.scrollEl && this.touchMode === "horizontal") {
-          event.preventDefault();
           const effectiveZoom = this.getEffectiveZoom();
-          this.scrollEl.scrollLeft -= (event.clientX - previous.x) / effectiveZoom;
+          this.scrollEl.scrollLeft -= dx / effectiveZoom;
+          this.scrollEl.scrollTop -= dy / effectiveZoom;
+          this.touchVelocity.x = this.touchVelocity.x * 0.68 + (dx / elapsed) * 0.32;
+          this.touchVelocity.y = this.touchVelocity.y * 0.68 + (dy / elapsed) * 0.32;
+          this.touchLastAt = now;
         }
       } else if (this.trackedTouches.size >= 2 && this.scrollEl) {
-        event.preventDefault();
+        this.touchVelocity = { x: 0, y: 0 };
         const beforeDistance = touchMapDistance(before);
         const afterDistance = touchMapDistance(this.trackedTouches);
         const beforeCenter = touchMapCenter(before);
@@ -725,11 +718,12 @@ class MarkdownAnnotationView extends ItemView {
       return;
     }
 
+    this.lastPenActivityAt = performance.now();
     this.keepSidebarsClosed();
     event.preventDefault();
     event.stopImmediatePropagation();
-    if (Math.hypot(event.clientX - this.penDownPosition.x, event.clientY - this.penDownPosition.y) > 7) {
-      this.penMoved = true;
+    if (this.handleStylusButton(event)) {
+      return;
     }
     if (this.tool === "eraser") {
       if ((event.buttons & 1) !== 0 || event.pressure > 0) {
@@ -752,15 +746,19 @@ class MarkdownAnnotationView extends ItemView {
 
   private onPointerUp(event: PointerEvent): void {
     if (event.pointerType === "touch") {
+      event.preventDefault();
       event.stopImmediatePropagation();
-      if (this.touchMode === "horizontal" || this.trackedTouches.size >= 2) {
-        event.preventDefault();
-      }
+      const wasSingleTouch = this.trackedTouches.size === 1;
       this.trackedTouches.delete(event.pointerId);
       if (this.stageEl?.hasPointerCapture(event.pointerId)) {
         this.stageEl.releasePointerCapture(event.pointerId);
       }
-      this.touchMode = this.trackedTouches.size === 1 ? "pending" : null;
+      if (wasSingleTouch && this.trackedTouches.size === 0) {
+        this.startTouchInertia();
+      } else if (this.trackedTouches.size === 1) {
+        this.touchLastAt = performance.now();
+        this.touchVelocity = { x: 0, y: 0 };
+      }
       return;
     }
 
@@ -776,9 +774,7 @@ class MarkdownAnnotationView extends ItemView {
 
     const stroke = this.currentStroke;
     this.currentStroke = null;
-    this.lastPenTapAt = this.penMoved ? 0 : performance.now();
-    this.lastPenTapPosition = { x: event.clientX, y: event.clientY };
-    this.lastStrokeWasTap = !this.penMoved && stroke !== null;
+    this.stylusButtonPressed = false;
     if (!stroke) {
       return;
     }
@@ -797,6 +793,36 @@ class MarkdownAnnotationView extends ItemView {
     new Notice(this.tool === "eraser" ? "橡皮" : "钢笔", 700);
   }
 
+  private handleStylusButton(event: PointerEvent): boolean {
+    const isPressed =
+      event.button === 2 ||
+      event.button === 5 ||
+      event.button === 6 ||
+      (event.buttons & 2) !== 0 ||
+      (event.buttons & 32) !== 0 ||
+      (event.buttons & 64) !== 0;
+    if (!isPressed) {
+      this.stylusButtonPressed = false;
+      return false;
+    }
+    if (!this.stylusButtonPressed) {
+      this.stylusButtonPressed = true;
+      this.toggleFromStylusHardware();
+    }
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    return true;
+  }
+
+  private toggleFromStylusHardware(): void {
+    const now = performance.now();
+    if (this.lastStylusToggleAt !== 0 && now - this.lastStylusToggleAt < 500) {
+      return;
+    }
+    this.lastStylusToggleAt = now;
+    this.togglePenEraser();
+  }
+
   private keepSidebarsClosed(): void {
     this.app.workspace.leftSplit.collapse();
     this.app.workspace.rightSplit.collapse();
@@ -808,6 +834,41 @@ class MarkdownAnnotationView extends ItemView {
       this.app.workspace.leftSplit.collapse();
       this.app.workspace.rightSplit.collapse();
     });
+  }
+
+  private stopTouchInertia(): void {
+    if (this.touchInertiaFrame !== null) {
+      window.cancelAnimationFrame(this.touchInertiaFrame);
+      this.touchInertiaFrame = null;
+    }
+  }
+
+  private startTouchInertia(): void {
+    this.stopTouchInertia();
+    let previousTime = performance.now();
+    const step = (time: number): void => {
+      const scroll = this.scrollEl;
+      if (!scroll) {
+        this.touchInertiaFrame = null;
+        return;
+      }
+      const elapsed = Math.min(32, Math.max(1, time - previousTime));
+      previousTime = time;
+      const effectiveZoom = this.getEffectiveZoom();
+      scroll.scrollLeft -= (this.touchVelocity.x * elapsed) / effectiveZoom;
+      scroll.scrollTop -= (this.touchVelocity.y * elapsed) / effectiveZoom;
+      const decay = Math.pow(0.94, elapsed / 16.67);
+      this.touchVelocity.x *= decay;
+      this.touchVelocity.y *= decay;
+      if (Math.hypot(this.touchVelocity.x, this.touchVelocity.y) < 0.015) {
+        this.touchInertiaFrame = null;
+        return;
+      }
+      this.touchInertiaFrame = window.requestAnimationFrame(step);
+    };
+    if (Math.hypot(this.touchVelocity.x, this.touchVelocity.y) >= 0.015) {
+      this.touchInertiaFrame = window.requestAnimationFrame(step);
+    }
   }
 
   private getInkPoint(event: PointerEvent): InkPoint {
@@ -846,8 +907,8 @@ class MarkdownAnnotationView extends ItemView {
       tiltY: previous.tiltY === undefined
         ? point.tiltY
         : previous.tiltY + ((point.tiltY ?? previous.tiltY) - previous.tiltY) * 0.34,
-      x: previous.x + (point.x - previous.x) * 0.72,
-      y: previous.y + (point.y - previous.y) * 0.72
+      x: point.x,
+      y: point.y
     });
   }
 
@@ -1043,39 +1104,46 @@ class MarkdownAnnotationView extends ItemView {
 }
 
 function drawStroke(context: CanvasRenderingContext2D, stroke: InkStroke, width: number): void {
-  if (stroke.points.length < 2) {
+  if (stroke.points.length === 0) {
+    return;
+  }
+  const outline = getStroke(
+    stroke.points.map((point) => ({
+      pressure: point.pressure ?? 0.5,
+      x: point.x * width,
+      y: point.y
+    })),
+    {
+      end: { cap: true, taper: 0 },
+      last: true,
+      simulatePressure: false,
+      size: stroke.width,
+      smoothing: stroke.tool === "highlighter" ? 0.72 : 0.78,
+      start: { cap: true, taper: 0 },
+      streamline: stroke.tool === "highlighter" ? 0.42 : 0.56,
+      thinning: stroke.tool === "highlighter" ? 0 : 0.52
+    }
+  );
+  if (outline.length < 3) {
     return;
   }
   context.save();
-  context.strokeStyle = stroke.color;
+  context.fillStyle = stroke.color;
   context.globalAlpha = stroke.opacity;
-  context.lineCap = "round";
-  context.lineJoin = "round";
-  for (let index = 1; index < stroke.points.length; index += 1) {
-    const beforePrevious = stroke.points[Math.max(0, index - 2)];
-    const previous = stroke.points[index - 1];
-    const point = stroke.points[index];
-    const pressure = ((previous.pressure ?? 0.5) + (point.pressure ?? 0.5)) / 2;
-    const tilt = Math.min(1, Math.hypot(point.tiltX ?? 0, point.tiltY ?? 0) / 60);
-    const pressureFactor = stroke.tool === "highlighter" ? 1 : 0.58 + pressure * 0.72;
-    context.lineWidth = Math.max(0.5, stroke.width * pressureFactor * (1 + tilt * 0.08));
-    const startX = index === 1
-      ? beforePrevious.x * width
-      : ((beforePrevious.x + previous.x) / 2) * width;
-    const startY = index === 1
-      ? beforePrevious.y
-      : (beforePrevious.y + previous.y) / 2;
-    const endX = index === stroke.points.length - 1
-      ? point.x * width
-      : ((previous.x + point.x) / 2) * width;
-    const endY = index === stroke.points.length - 1
-      ? point.y
-      : (previous.y + point.y) / 2;
-    context.beginPath();
-    context.moveTo(startX, startY);
-    context.quadraticCurveTo(previous.x * width, previous.y, endX, endY);
-    context.stroke();
+  context.beginPath();
+  context.moveTo(outline[0][0], outline[0][1]);
+  for (let index = 1; index < outline.length - 1; index += 1) {
+    const point = outline[index];
+    const next = outline[index + 1];
+    context.quadraticCurveTo(
+      point[0],
+      point[1],
+      (point[0] + next[0]) / 2,
+      (point[1] + next[1]) / 2
+    );
   }
+  context.closePath();
+  context.fill();
   context.restore();
 }
 
