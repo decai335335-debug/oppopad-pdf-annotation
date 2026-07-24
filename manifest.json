@@ -1,9 +1,9 @@
 {
   "id": "oppopad-pdf-annotation",
   "name": "OPPO Pad Markdown Annotation",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "minAppVersion": "1.8.7",
-  "description": "Synced Markdown handwriting powered by perfect-freehand, with a fixed page layout, pen, highlighter, kinetic touch pan, zoom, pressure, colors, width, and opacity.",
+  "description": "Low-latency synced Markdown handwriting with a live vector pen layer, fixed layout, highlighter, touch pan and zoom, pressure, colors, width, and opacity.",
   "author": "decai335335-debug",
   "authorUrl": "https://github.com/decai335335-debug",
   "isDesktopOnly": false

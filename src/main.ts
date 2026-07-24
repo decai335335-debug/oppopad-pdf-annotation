@@ -247,6 +247,9 @@ class MarkdownAnnotationView extends ItemView {
   private canvasTiles: CanvasTile[] = [];
   private clearConfirmUntil = 0;
   private currentStroke: InkStroke | null = null;
+  private liveStrokeFrame: number | null = null;
+  private liveStrokePath: SVGPathElement | null = null;
+  private liveStrokeSvg: SVGSVGElement | null = null;
   private colorInput: HTMLInputElement | null = null;
   private filePath = "";
   private markdownComponent: Component | null = null;
@@ -336,11 +339,20 @@ class MarkdownAnnotationView extends ItemView {
     this.stageEl = this.scrollEl.createDiv({ cls: "oppopad-annotation-stage" });
     this.stageEl.style.setProperty("--oppopad-page-width", `${LOGICAL_PAGE_WIDTH}px`);
     this.markdownEl = this.stageEl.createDiv({ cls: "markdown-preview-view markdown-rendered oppopad-markdown-content" });
+    this.liveStrokeSvg = this.stageEl.createSvg("svg", {
+      cls: "oppopad-live-stroke",
+      attr: {
+        "aria-hidden": "true",
+        preserveAspectRatio: "none",
+        width: String(LOGICAL_PAGE_WIDTH)
+      }
+    });
+    this.liveStrokePath = this.liveStrokeSvg.createSvg("path");
 
     this.registerDomEvent(this.stageEl, "pointerdown", (event) => this.onPointerDown(event), { capture: true });
     this.registerDomEvent(this.stageEl, "pointermove", (event) => this.onPointerMove(event), { capture: true });
     this.registerDomEvent(this.stageEl, "pointerup", (event) => this.onPointerUp(event), { capture: true });
-    this.registerDomEvent(this.stageEl, "pointercancel", (event) => this.onPointerUp(event), { capture: true });
+    this.registerDomEvent(this.stageEl, "pointercancel", (event) => this.onPointerCancel(event), { capture: true });
     this.registerDomEvent(this.stageEl, "contextmenu", (event) => {
       if (performance.now() - this.lastPenActivityAt < 900) {
         event.preventDefault();
@@ -404,6 +416,10 @@ class MarkdownAnnotationView extends ItemView {
     if (this.redrawFrame !== null) {
       window.cancelAnimationFrame(this.redrawFrame);
       this.redrawFrame = null;
+    }
+    if (this.liveStrokeFrame !== null) {
+      window.cancelAnimationFrame(this.liveStrokeFrame);
+      this.liveStrokeFrame = null;
     }
     if (this.sidebarCloseFrame !== null) {
       window.cancelAnimationFrame(this.sidebarCloseFrame);
@@ -575,6 +591,7 @@ class MarkdownAnnotationView extends ItemView {
   private setTool(tool: InkTool): void {
     this.tool = tool;
     this.currentStroke = null;
+    this.clearLiveStroke();
     this.updateToolbarState();
   }
 
@@ -671,7 +688,7 @@ class MarkdownAnnotationView extends ItemView {
       tool: drawingTool,
       width: style.width
     };
-    this.redraw();
+    this.scheduleLiveStroke();
   }
 
   private onPointerMove(event: PointerEvent): void {
@@ -679,7 +696,6 @@ class MarkdownAnnotationView extends ItemView {
       if (!this.trackedTouches.has(event.pointerId)) {
         return;
       }
-      this.keepSidebarsClosed();
       event.preventDefault();
       event.stopImmediatePropagation();
       const before = new Map(this.trackedTouches);
@@ -719,7 +735,6 @@ class MarkdownAnnotationView extends ItemView {
     }
 
     this.lastPenActivityAt = performance.now();
-    this.keepSidebarsClosed();
     event.preventDefault();
     event.stopImmediatePropagation();
     if (this.handleStylusButton(event)) {
@@ -741,7 +756,7 @@ class MarkdownAnnotationView extends ItemView {
     for (const sample of samples) {
       this.appendInkPoint(this.getInkPoint(sample));
     }
-    this.redraw();
+    this.scheduleLiveStroke();
   }
 
   private onPointerUp(event: PointerEvent): void {
@@ -773,7 +788,6 @@ class MarkdownAnnotationView extends ItemView {
     }
 
     const stroke = this.currentStroke;
-    this.currentStroke = null;
     this.stylusButtonPressed = false;
     if (!stroke) {
       return;
@@ -783,9 +797,29 @@ class MarkdownAnnotationView extends ItemView {
       const point = stroke.points[0];
       stroke.points.push({ ...point, x: Math.min(1, point.x + 0.001) });
     }
+    this.currentStroke = null;
+    this.clearLiveStroke();
     this.strokes.push(stroke);
     this.scheduleSave();
     this.redraw();
+  }
+
+  private onPointerCancel(event: PointerEvent): void {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    if (this.stageEl?.hasPointerCapture(event.pointerId)) {
+      this.stageEl.releasePointerCapture(event.pointerId);
+    }
+    if (event.pointerType === "touch") {
+      this.trackedTouches.delete(event.pointerId);
+      this.touchVelocity = { x: 0, y: 0 };
+      return;
+    }
+    if (event.pointerType === "pen") {
+      this.currentStroke = null;
+      this.stylusButtonPressed = false;
+      this.clearLiveStroke();
+    }
   }
 
   private togglePenEraser(): void {
@@ -877,8 +911,12 @@ class MarkdownAnnotationView extends ItemView {
       return { x: 0, y: 0 };
     }
     const rect = stage.getBoundingClientRect();
+    const pressure =
+      event.pressure > 0.01
+        ? clamp(event.pressure * 1.15, 0.12, 1)
+        : undefined;
     return {
-      pressure: clamp(event.pressure > 0 ? event.pressure : 0.5, 0, 1),
+      pressure,
       tiltX: clamp(event.tiltX, -90, 90),
       tiltY: clamp(event.tiltY, -90, 90),
       x: clamp((event.clientX - rect.left) / Math.max(1, rect.width), 0, 1),
@@ -894,13 +932,23 @@ class MarkdownAnnotationView extends ItemView {
     const previous = stroke.points[stroke.points.length - 1];
     const width = LOGICAL_PAGE_WIDTH;
     const distance = Math.hypot((point.x - previous.x) * width, point.y - previous.y);
-    if (distance < 0.35) {
+    const mergeDistance = 0.45 / Math.max(0.1, this.getEffectiveZoom());
+    if (distance < mergeDistance) {
+      if ((point.pressure ?? 0) > (previous.pressure ?? 0)) {
+        previous.pressure = point.pressure;
+      }
       return;
     }
+    const rawPressure = point.pressure ?? previous.pressure ?? 0.5;
+    const smoothedPressure =
+      (previous.pressure ?? rawPressure) + (rawPressure - (previous.pressure ?? rawPressure)) * 0.38;
+    const maximumPressureChange = Math.max(0.025, (distance / Math.max(stroke.width, 0.5)) * 0.28);
     stroke.points.push({
-      pressure: previous.pressure === undefined
-        ? point.pressure
-        : previous.pressure + ((point.pressure ?? previous.pressure) - previous.pressure) * 0.42,
+      pressure: clamp(
+        smoothedPressure,
+        (previous.pressure ?? smoothedPressure) - maximumPressureChange,
+        (previous.pressure ?? smoothedPressure) + maximumPressureChange
+      ),
       tiltX: previous.tiltX === undefined
         ? point.tiltX
         : previous.tiltX + ((point.tiltX ?? previous.tiltX) - previous.tiltX) * 0.34,
@@ -912,6 +960,31 @@ class MarkdownAnnotationView extends ItemView {
     });
   }
 
+  private scheduleLiveStroke(): void {
+    if (this.liveStrokeFrame !== null) {
+      return;
+    }
+    this.liveStrokeFrame = window.requestAnimationFrame(() => {
+      this.liveStrokeFrame = null;
+      const stroke = this.currentStroke;
+      const path = this.liveStrokePath;
+      if (!stroke || !path) {
+        return;
+      }
+      path.setAttribute("d", strokeOutlineToSvgPath(getStrokeOutline(stroke, LOGICAL_PAGE_WIDTH)));
+      path.setAttribute("fill", stroke.color);
+      path.setAttribute("fill-opacity", String(stroke.opacity));
+    });
+  }
+
+  private clearLiveStroke(): void {
+    if (this.liveStrokeFrame !== null) {
+      window.cancelAnimationFrame(this.liveStrokeFrame);
+      this.liveStrokeFrame = null;
+    }
+    this.liveStrokePath?.removeAttribute("d");
+  }
+
   private appendFinalPoint(stroke: InkStroke, point: InkPoint): void {
     const previous = stroke.points.at(-1);
     if (!previous) {
@@ -920,7 +993,10 @@ class MarkdownAnnotationView extends ItemView {
     }
     const width = LOGICAL_PAGE_WIDTH;
     if (Math.hypot((point.x - previous.x) * width, point.y - previous.y) >= 0.2) {
-      stroke.points.push(point);
+      stroke.points.push({
+        ...point,
+        pressure: point.pressure ?? previous.pressure
+      });
     }
   }
 
@@ -1005,6 +1081,10 @@ class MarkdownAnnotationView extends ItemView {
       1
     );
     stage.style.setProperty("--oppopad-stage-height", `${height}px`);
+    if (this.liveStrokeSvg) {
+      this.liveStrokeSvg.setAttribute("height", String(height));
+      this.liveStrokeSvg.setAttribute("viewBox", `0 0 ${LOGICAL_PAGE_WIDTH} ${height}`);
+    }
     const tileCount = Math.max(1, Math.ceil(height / CANVAS_TILE_HEIGHT));
     const lastTileHeight = height - (tileCount - 1) * CANVAS_TILE_HEIGHT;
     const requiresRebuild =
@@ -1057,12 +1137,6 @@ class MarkdownAnnotationView extends ItemView {
             drawStroke(context, stroke, LOGICAL_PAGE_WIDTH);
           }
         }
-        if (
-          this.currentStroke &&
-          strokeIntersectsRange(this.currentStroke, tile.top, tile.top + tile.height)
-        ) {
-          drawStroke(context, this.currentStroke, LOGICAL_PAGE_WIDTH);
-        }
         context.restore();
       }
     });
@@ -1104,26 +1178,7 @@ class MarkdownAnnotationView extends ItemView {
 }
 
 function drawStroke(context: CanvasRenderingContext2D, stroke: InkStroke, width: number): void {
-  if (stroke.points.length === 0) {
-    return;
-  }
-  const outline = getStroke(
-    stroke.points.map((point) => ({
-      pressure: point.pressure ?? 0.5,
-      x: point.x * width,
-      y: point.y
-    })),
-    {
-      end: { cap: true, taper: 0 },
-      last: true,
-      simulatePressure: false,
-      size: stroke.width,
-      smoothing: stroke.tool === "highlighter" ? 0.72 : 0.78,
-      start: { cap: true, taper: 0 },
-      streamline: stroke.tool === "highlighter" ? 0.42 : 0.56,
-      thinning: stroke.tool === "highlighter" ? 0 : 0.52
-    }
-  );
+  const outline = getStrokeOutline(stroke, width);
   if (outline.length < 3) {
     return;
   }
@@ -1145,6 +1200,42 @@ function drawStroke(context: CanvasRenderingContext2D, stroke: InkStroke, width:
   context.closePath();
   context.fill();
   context.restore();
+}
+
+function getStrokeOutline(stroke: InkStroke, width: number): number[][] {
+  if (stroke.points.length === 0) {
+    return [];
+  }
+  return getStroke(
+    stroke.points.map((point) => ({
+      pressure: point.pressure ?? 0.5,
+      x: point.x * width,
+      y: point.y
+    })),
+    {
+      end: { cap: true, taper: 0 },
+      last: true,
+      simulatePressure: false,
+      size: stroke.width,
+      smoothing: stroke.tool === "highlighter" ? 0.62 : 0.58,
+      start: { cap: true, taper: 0 },
+      streamline: stroke.tool === "highlighter" ? 0.28 : 0.18,
+      thinning: stroke.tool === "highlighter" ? 0 : 0.58
+    }
+  );
+}
+
+function strokeOutlineToSvgPath(outline: number[][]): string {
+  if (outline.length < 3) {
+    return "";
+  }
+  let path = `M ${outline[0][0].toFixed(2)} ${outline[0][1].toFixed(2)}`;
+  for (let index = 1; index < outline.length - 1; index += 1) {
+    const point = outline[index];
+    const next = outline[index + 1];
+    path += ` Q ${point[0].toFixed(2)} ${point[1].toFixed(2)} ${((point[0] + next[0]) / 2).toFixed(2)} ${((point[1] + next[1]) / 2).toFixed(2)}`;
+  }
+  return `${path} Z`;
 }
 
 function strokeHitTest(

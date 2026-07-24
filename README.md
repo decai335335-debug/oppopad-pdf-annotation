@@ -82,6 +82,8 @@ Version 1.3.0 adds a fixed landscape-width layout, vault-synced annotation stora
 
 Version 1.4.0 replaces the custom line renderer with the MIT-licensed `perfect-freehand` outline engine used by established Obsidian drawing plugins, removes pen-tip double-tap switching, and adds kinetic touch scrolling without allowing the browser to cancel pen strokes.
 
+Version 1.5.0 renders the in-progress stroke in a dedicated live SVG layer and commits it to the tiled canvas only on pen-up. It also reduces tip lag, preserves the final pressure on pen lift, rejects cancelled fragments, and avoids sidebar work during every pen sample.
+
 ---
 
 ## 中文说明
