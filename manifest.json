@@ -1,0 +1,10 @@
+{
+  "id": "oppopad-pdf-annotation",
+  "name": "OPPO Pad PDF Annotation",
+  "version": "1.0.0",
+  "minAppVersion": "1.8.7",
+  "description": "Stylus-first PDF annotation with palm rejection, touch navigation, pressure-sensitive ink, and export tools.",
+  "author": "decai335335-debug",
+  "authorUrl": "https://github.com/decai335335-debug",
+  "isDesktopOnly": false
+}
