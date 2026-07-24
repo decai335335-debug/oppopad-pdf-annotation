@@ -10,13 +10,16 @@ This is an independent community project and is not affiliated with, endorsed by
 - Uses Obsidian's native `MarkdownRenderer`, including links, embeds, images, callouts, and themes.
 - Smooth fountain pen and translucent highlighter tools.
 - Adjustable color, stroke width, and opacity.
+- Fixed landscape-width document layout, so rotation does not reflow Markdown underneath existing ink.
 - Stylus input writes or erases on the annotation layer.
 - One-finger touch pans the document without creating ink.
+- Vertical one-finger reading uses native WebView scrolling for normal Markdown-style inertia.
 - Two-finger touch pans and zooms the rendered Markdown and handwriting together.
 - Uses pressure, tilt, and high-frequency coalesced pointer samples when Android WebView exposes them.
 - Stylus side-button, reported double-click, or two quick pen-tip taps switches between pen and eraser.
 - Undo, clear, zoom, and return-to-Markdown toolbar actions.
-- Handwriting is saved locally per Markdown file and follows file renames.
+- Handwriting is saved per Markdown file in `OPPO Pad Annotations/annotations.json` inside the vault and follows file renames.
+- The same annotations load on desktop when that vault folder is synchronized.
 - No account, telemetry, advertising, or automatic network requests.
 
 Hardware capabilities vary by tablet, stylus, ColorOS version, and Android WebView. The plugin cannot guarantee a specific sampling rate or native-app latency.
@@ -53,7 +56,7 @@ Obsidian 1.8.7 or later is required.
 
 ## Privacy and storage
 
-Handwriting data is stored in the plugin's local Obsidian data file. Markdown content and annotations are not sent to an external service. Removing a handwritten stroke does not modify the Markdown source text.
+Handwriting data is stored in `OPPO Pad Annotations/annotations.json` inside the vault, with a plugin-local backup. This makes the data available to the same plugin on other synchronized devices. Markdown content and annotations are not sent to an external service by the plugin. Removing a handwritten stroke does not modify the Markdown source text.
 
 ## Development
 
@@ -73,6 +76,8 @@ Version 1.1.1 hardens the Android view lifecycle, reuses the current Markdown ta
 
 Version 1.2.0 adds the pen/highlighter controls, smoother curves, manual touch pan/pinch handling, and stronger suppression of Obsidian's edge-pane gestures while writing.
 
+Version 1.3.0 adds a fixed landscape-width layout, vault-synced annotation storage, tiled high-resolution canvases, frame-batched drawing, and automatic sidebar closing during pen/touch gestures.
+
 ---
 
 ## 中文说明
@@ -80,6 +85,7 @@ Version 1.2.0 adds the pen/highlighter controls, smoother curves, manual touch p
 这个插件用于给 Markdown 文件做手写标注，不是 PDF 批注工具。
 
 - 先使用 Obsidian 原生渲染器加载真正的 Markdown 内容，再叠加手写层。
-- 手写笔负责书写，单指负责滚动，双指负责缩放。
+- 横竖屏使用相同的横屏逻辑页面宽度，避免旋转后正文重排和笔迹错位。
+- 手写笔负责书写，单指负责平移，双指负责缩放和平移。
 - 支持压感、倾斜、高频采样，以及系统能够上报时的笔身双击切换橡皮。
-- 每个 Markdown 文件的笔迹独立保存在本地，不会修改 Markdown 源文字。
+- 每个 Markdown 文件的笔迹保存在仓库内的 `OPPO Pad Annotations/annotations.json`，同步到电脑后可由同一插件读取，不会修改 Markdown 源文字。

@@ -6,13 +6,18 @@ import {
   Plugin,
   TFile,
   WorkspaceLeaf,
+  normalizePath,
   setIcon
 } from "obsidian";
 import type { ViewStateResult } from "obsidian";
 
 const VIEW_TYPE = "oppopad-markdown-annotation";
 const DATA_VERSION = 2;
+const SYNC_FOLDER = "OPPO Pad Annotations";
+const SYNC_FILE = `${SYNC_FOLDER}/annotations.json`;
 const SAVE_DELAY_MS = 350;
+const LOGICAL_PAGE_WIDTH = 1180;
+const CANVAS_TILE_HEIGHT = 2048;
 
 type DrawingTool = "pen" | "highlighter";
 type InkTool = DrawingTool | "eraser";
@@ -55,6 +60,12 @@ interface AnnotationViewState {
   file?: string;
 }
 
+interface CanvasTile {
+  canvas: HTMLCanvasElement;
+  height: number;
+  top: number;
+}
+
 const DEFAULT_PREFERENCES: ToolPreferences = {
   pen: { color: "#1f2937", opacity: 1, width: 2.4 },
   highlighter: { color: "#ffd43b", opacity: 0.32, width: 18 }
@@ -72,9 +83,11 @@ export default class OppoPadMarkdownAnnotationPlugin extends Plugin {
     annotations: {},
     preferences: clonePreferences(DEFAULT_PREFERENCES)
   };
+  private saveQueue: Promise<void> = Promise.resolve();
 
   async onload(): Promise<void> {
-    this.data = normalizePluginData(await this.loadData());
+    const legacyData = normalizePluginData(await this.loadData());
+    this.data = await this.loadSyncedData(legacyData);
 
     this.registerView(VIEW_TYPE, (leaf) => new MarkdownAnnotationView(leaf, this));
 
@@ -127,7 +140,7 @@ export default class OppoPadMarkdownAnnotationPlugin extends Plugin {
         }
         delete this.data.annotations[oldPath];
         this.data.annotations[file.path] = annotations;
-        void this.saveData(this.data);
+        void this.persistData();
       })
     );
   }
@@ -142,7 +155,7 @@ export default class OppoPadMarkdownAnnotationPlugin extends Plugin {
     } else {
       this.data.annotations[filePath] = strokes.map(cloneStroke);
     }
-    await this.saveData(this.data);
+    await this.persistData();
   }
 
   getPreferences(): ToolPreferences {
@@ -151,15 +164,70 @@ export default class OppoPadMarkdownAnnotationPlugin extends Plugin {
 
   async savePreferences(preferences: ToolPreferences): Promise<void> {
     this.data.preferences = clonePreferences(preferences);
-    await this.saveData(this.data);
+    await this.persistData();
+  }
+
+  private async loadSyncedData(fallback: PluginData): Promise<PluginData> {
+    const file = this.app.vault.getAbstractFileByPath(normalizePath(SYNC_FILE));
+    if (file instanceof TFile) {
+      try {
+        return normalizePluginData(JSON.parse(await this.app.vault.cachedRead(file)) as unknown);
+      } catch (error) {
+        console.error("Could not read synced handwriting data.", error);
+        new Notice("Synced handwriting data could not be read; using the local backup.");
+        return fallback;
+      }
+    }
+    this.data = fallback;
+    await this.persistData();
+    return fallback;
+  }
+
+  private async refreshSyncedData(): Promise<void> {
+    await this.saveQueue;
+    const file = this.app.vault.getAbstractFileByPath(normalizePath(SYNC_FILE));
+    if (!(file instanceof TFile)) {
+      return;
+    }
+    try {
+      this.data = normalizePluginData(JSON.parse(await this.app.vault.cachedRead(file)) as unknown);
+    } catch (error) {
+      console.error("Could not refresh synced handwriting data.", error);
+    }
+  }
+
+  private persistData(): Promise<void> {
+    this.saveQueue = this.saveQueue
+      .then(async () => {
+        const folderPath = normalizePath(SYNC_FOLDER);
+        if (!this.app.vault.getAbstractFileByPath(folderPath)) {
+          await this.app.vault.createFolder(folderPath);
+        }
+        const filePath = normalizePath(SYNC_FILE);
+        const content = `${JSON.stringify(this.data, null, 2)}\n`;
+        const file = this.app.vault.getAbstractFileByPath(filePath);
+        if (file instanceof TFile) {
+          await this.app.vault.modify(file, content);
+        } else {
+          await this.app.vault.create(filePath, content);
+        }
+        await this.saveData(this.data);
+      })
+      .catch((error) => {
+        console.error("Could not save synced handwriting data.", error);
+        new Notice("Could not save handwriting data to the synced folder.");
+      });
+    return this.saveQueue;
   }
 
   private async openMarkdownAnnotation(file: TFile, leaf: WorkspaceLeaf): Promise<void> {
+    await this.refreshSyncedData();
     for (const existingLeaf of this.app.workspace.getLeavesOfType(VIEW_TYPE)) {
       await this.app.workspace.revealLeaf(existingLeaf);
       if (existingLeaf.view instanceof MarkdownAnnotationView) {
         const state = existingLeaf.view.getState();
         if (state.file === file.path) {
+          existingLeaf.view.reloadAnnotations();
           return;
         }
       }
@@ -175,7 +243,7 @@ export default class OppoPadMarkdownAnnotationPlugin extends Plugin {
 }
 
 class MarkdownAnnotationView extends ItemView {
-  private canvas: HTMLCanvasElement | null = null;
+  private canvasTiles: CanvasTile[] = [];
   private clearConfirmUntil = 0;
   private currentStroke: InkStroke | null = null;
   private colorInput: HTMLInputElement | null = null;
@@ -186,15 +254,18 @@ class MarkdownAnnotationView extends ItemView {
   private markdownComponent: Component | null = null;
   private markdownEl: HTMLElement | null = null;
   private renderGeneration = 0;
+  private redrawFrame: number | null = null;
   private resizeObserver: ResizeObserver | null = null;
-  private renderScale = 1;
   private saveTimer: number | null = null;
   private scrollEl: HTMLElement | null = null;
+  private sidebarCloseFrame: number | null = null;
   private stageEl: HTMLElement | null = null;
   private strokes: InkStroke[] = [];
   private tool: InkTool = "pen";
   private toolbarEl: HTMLElement | null = null;
   private trackedTouches = new Map<number, { x: number; y: number }>();
+  private touchMode: "pending" | "horizontal" | "vertical" | null = null;
+  private fitZoom = 1;
   private zoom = 1;
   private opacityInput: HTMLInputElement | null = null;
   private opacityValueEl: HTMLElement | null = null;
@@ -229,6 +300,14 @@ class MarkdownAnnotationView extends ItemView {
     return { file: this.filePath };
   }
 
+  reloadAnnotations(): void {
+    if (!this.filePath) {
+      return;
+    }
+    this.strokes = this.plugin.getAnnotations(this.filePath);
+    this.redraw();
+  }
+
   async setState(state: AnnotationViewState, result: ViewStateResult): Promise<void> {
     await super.setState(state, result);
     this.filePath = typeof state.file === "string" ? state.file : "";
@@ -254,29 +333,28 @@ class MarkdownAnnotationView extends ItemView {
 
     this.scrollEl = this.contentEl.createDiv({ cls: "oppopad-annotation-scroll" });
     this.stageEl = this.scrollEl.createDiv({ cls: "oppopad-annotation-stage" });
+    this.stageEl.style.setProperty("--oppopad-page-width", `${LOGICAL_PAGE_WIDTH}px`);
     this.markdownEl = this.stageEl.createDiv({ cls: "markdown-preview-view markdown-rendered oppopad-markdown-content" });
-    this.canvas = this.stageEl.createEl("canvas", {
-      cls: "oppopad-ink-canvas",
-      attr: { "aria-hidden": "true" }
-    });
 
     this.registerDomEvent(this.stageEl, "pointerdown", (event) => this.onPointerDown(event), { capture: true });
     this.registerDomEvent(this.stageEl, "pointermove", (event) => this.onPointerMove(event), { capture: true });
     this.registerDomEvent(this.stageEl, "pointerup", (event) => this.onPointerUp(event), { capture: true });
     this.registerDomEvent(this.stageEl, "pointercancel", (event) => this.onPointerUp(event), { capture: true });
-    const suppressNativeTouchGesture = (event: TouchEvent): void => {
-      event.preventDefault();
+    const suppressSidebarTouchGesture = (event: TouchEvent): void => {
+      if (event.touches.length >= 2 || this.touchMode === "horizontal") {
+        event.preventDefault();
+      }
       event.stopImmediatePropagation();
     };
-    this.registerDomEvent(this.stageEl, "touchstart", suppressNativeTouchGesture, {
+    this.registerDomEvent(this.stageEl, "touchstart", suppressSidebarTouchGesture, {
       capture: true,
       passive: false
     });
-    this.registerDomEvent(this.stageEl, "touchmove", suppressNativeTouchGesture, {
+    this.registerDomEvent(this.stageEl, "touchmove", suppressSidebarTouchGesture, {
       capture: true,
       passive: false
     });
-    this.registerDomEvent(this.stageEl, "touchend", suppressNativeTouchGesture, {
+    this.registerDomEvent(this.stageEl, "touchend", suppressSidebarTouchGesture, {
       capture: true,
       passive: false
     });
@@ -307,6 +385,14 @@ class MarkdownAnnotationView extends ItemView {
   protected async onClose(): Promise<void> {
     this.flushSave();
     this.unloadMarkdownComponent();
+    if (this.redrawFrame !== null) {
+      window.cancelAnimationFrame(this.redrawFrame);
+      this.redrawFrame = null;
+    }
+    if (this.sidebarCloseFrame !== null) {
+      window.cancelAnimationFrame(this.sidebarCloseFrame);
+      this.sidebarCloseFrame = null;
+    }
     if (this.saveTimer !== null) {
       window.clearTimeout(this.saveTimer);
       this.saveTimer = null;
@@ -525,10 +611,18 @@ class MarkdownAnnotationView extends ItemView {
 
   private onPointerDown(event: PointerEvent): void {
     if (event.pointerType === "touch") {
-      event.preventDefault();
+      this.keepSidebarsClosed();
       event.stopImmediatePropagation();
       this.trackedTouches.set(event.pointerId, { x: event.clientX, y: event.clientY });
-      this.stageEl?.setPointerCapture(event.pointerId);
+      if (this.trackedTouches.size === 1) {
+        this.touchMode = "pending";
+      } else {
+        this.touchMode = null;
+        event.preventDefault();
+        for (const pointerId of this.trackedTouches.keys()) {
+          this.stageEl?.setPointerCapture(pointerId);
+        }
+      }
       return;
     }
 
@@ -536,6 +630,7 @@ class MarkdownAnnotationView extends ItemView {
       return;
     }
 
+    this.keepSidebarsClosed();
     event.preventDefault();
     event.stopImmediatePropagation();
 
@@ -592,23 +687,33 @@ class MarkdownAnnotationView extends ItemView {
       if (!this.trackedTouches.has(event.pointerId)) {
         return;
       }
-      event.preventDefault();
+      this.keepSidebarsClosed();
       event.stopImmediatePropagation();
       const before = new Map(this.trackedTouches);
       this.trackedTouches.set(event.pointerId, { x: event.clientX, y: event.clientY });
       if (this.trackedTouches.size === 1) {
         const previous = before.get(event.pointerId);
-        if (previous && this.scrollEl) {
-          this.scrollEl.scrollLeft -= event.clientX - previous.x;
-          this.scrollEl.scrollTop -= event.clientY - previous.y;
+        if (previous && this.touchMode === "pending") {
+          const dx = event.clientX - previous.x;
+          const dy = event.clientY - previous.y;
+          if (Math.hypot(dx, dy) >= 4) {
+            this.touchMode = Math.abs(dx) > Math.abs(dy) * 1.15 ? "horizontal" : "vertical";
+          }
+        }
+        if (previous && this.scrollEl && this.touchMode === "horizontal") {
+          event.preventDefault();
+          const effectiveZoom = this.getEffectiveZoom();
+          this.scrollEl.scrollLeft -= (event.clientX - previous.x) / effectiveZoom;
         }
       } else if (this.trackedTouches.size >= 2 && this.scrollEl) {
+        event.preventDefault();
         const beforeDistance = touchMapDistance(before);
         const afterDistance = touchMapDistance(this.trackedTouches);
         const beforeCenter = touchMapCenter(before);
         const afterCenter = touchMapCenter(this.trackedTouches);
-        this.scrollEl.scrollLeft -= afterCenter.x - beforeCenter.x;
-        this.scrollEl.scrollTop -= afterCenter.y - beforeCenter.y;
+        const effectiveZoom = this.getEffectiveZoom();
+        this.scrollEl.scrollLeft -= (afterCenter.x - beforeCenter.x) / effectiveZoom;
+        this.scrollEl.scrollTop -= (afterCenter.y - beforeCenter.y) / effectiveZoom;
         if (beforeDistance > 0 && afterDistance > 0) {
           this.setZoom(this.zoom * (afterDistance / beforeDistance));
         }
@@ -620,6 +725,7 @@ class MarkdownAnnotationView extends ItemView {
       return;
     }
 
+    this.keepSidebarsClosed();
     event.preventDefault();
     event.stopImmediatePropagation();
     if (Math.hypot(event.clientX - this.penDownPosition.x, event.clientY - this.penDownPosition.y) > 7) {
@@ -636,7 +742,8 @@ class MarkdownAnnotationView extends ItemView {
       return;
     }
 
-    const samples = typeof event.getCoalescedEvents === "function" ? event.getCoalescedEvents() : [event];
+    const coalesced = typeof event.getCoalescedEvents === "function" ? event.getCoalescedEvents() : [];
+    const samples = coalesced.length > 0 ? [...coalesced, event] : [event];
     for (const sample of samples) {
       this.appendInkPoint(this.getInkPoint(sample));
     }
@@ -645,12 +752,15 @@ class MarkdownAnnotationView extends ItemView {
 
   private onPointerUp(event: PointerEvent): void {
     if (event.pointerType === "touch") {
-      event.preventDefault();
       event.stopImmediatePropagation();
+      if (this.touchMode === "horizontal" || this.trackedTouches.size >= 2) {
+        event.preventDefault();
+      }
       this.trackedTouches.delete(event.pointerId);
       if (this.stageEl?.hasPointerCapture(event.pointerId)) {
         this.stageEl.releasePointerCapture(event.pointerId);
       }
+      this.touchMode = this.trackedTouches.size === 1 ? "pending" : null;
       return;
     }
 
@@ -687,6 +797,19 @@ class MarkdownAnnotationView extends ItemView {
     new Notice(this.tool === "eraser" ? "橡皮" : "钢笔", 700);
   }
 
+  private keepSidebarsClosed(): void {
+    this.app.workspace.leftSplit.collapse();
+    this.app.workspace.rightSplit.collapse();
+    if (this.sidebarCloseFrame !== null) {
+      return;
+    }
+    this.sidebarCloseFrame = window.requestAnimationFrame(() => {
+      this.sidebarCloseFrame = null;
+      this.app.workspace.leftSplit.collapse();
+      this.app.workspace.rightSplit.collapse();
+    });
+  }
+
   private getInkPoint(event: PointerEvent): InkPoint {
     const stage = this.stageEl;
     if (!stage) {
@@ -698,7 +821,7 @@ class MarkdownAnnotationView extends ItemView {
       tiltX: clamp(event.tiltX, -90, 90),
       tiltY: clamp(event.tiltY, -90, 90),
       x: clamp((event.clientX - rect.left) / Math.max(1, rect.width), 0, 1),
-      y: Math.max(0, (event.clientY - rect.top) / this.zoom)
+      y: Math.max(0, (event.clientY - rect.top) / this.getEffectiveZoom())
     };
   }
 
@@ -708,7 +831,7 @@ class MarkdownAnnotationView extends ItemView {
       return;
     }
     const previous = stroke.points[stroke.points.length - 1];
-    const width = this.canvas?.clientWidth ?? 1;
+    const width = LOGICAL_PAGE_WIDTH;
     const distance = Math.hypot((point.x - previous.x) * width, point.y - previous.y);
     if (distance < 0.35) {
       return;
@@ -734,14 +857,14 @@ class MarkdownAnnotationView extends ItemView {
       stroke.points.push(point);
       return;
     }
-    const width = this.canvas?.clientWidth ?? 1;
+    const width = LOGICAL_PAGE_WIDTH;
     if (Math.hypot((point.x - previous.x) * width, point.y - previous.y) >= 0.2) {
       stroke.points.push(point);
     }
   }
 
   private eraseAt(point: InkPoint): void {
-    const width = this.canvas?.clientWidth ?? 1;
+    const width = LOGICAL_PAGE_WIDTH;
     const x = point.x * width;
     const before = this.strokes.length;
     this.strokes = this.strokes.filter((stroke) => !strokeHitTest(stroke, x, point.y, width, 14));
@@ -776,9 +899,17 @@ class MarkdownAnnotationView extends ItemView {
   }
 
   private setZoom(value: number): void {
-    this.zoom = clamp(value, 0.6, 3);
+    this.zoom = clamp(value, 0.5, 3);
+    this.applyZoom();
+  }
+
+  private getEffectiveZoom(): number {
+    return this.fitZoom * this.zoom;
+  }
+
+  private applyZoom(): void {
     if (this.stageEl) {
-      this.stageEl.style.setProperty("--oppopad-zoom", String(this.zoom));
+      this.stageEl.style.setProperty("--oppopad-zoom", String(this.getEffectiveZoom()));
     }
   }
 
@@ -800,51 +931,80 @@ class MarkdownAnnotationView extends ItemView {
   }
 
   private resizeCanvas(): void {
-    const canvas = this.canvas;
     const stage = this.stageEl;
     const scroll = this.scrollEl;
-    if (!canvas || !stage || !scroll) {
+    if (!stage || !scroll) {
       return;
     }
-    const width = Math.max(1, stage.clientWidth);
-    const height = Math.max(scroll.clientHeight, this.markdownEl?.scrollHeight ?? 0, 1);
-    stage.style.setProperty("--oppopad-stage-height", `${height}px`);
-    const maxCanvasDimension = 8192;
-    this.renderScale = Math.min(
-      window.devicePixelRatio || 1,
-      1.5,
-      maxCanvasDimension / width,
-      maxCanvasDimension / height
+    this.fitZoom = Math.min(1, Math.max(0.1, scroll.clientWidth / LOGICAL_PAGE_WIDTH));
+    this.applyZoom();
+    const height = Math.max(
+      scroll.clientHeight / this.getEffectiveZoom(),
+      this.markdownEl?.scrollHeight ?? 0,
+      1
     );
-    const pixelWidth = Math.max(1, Math.round(width * this.renderScale));
-    const pixelHeight = Math.max(1, Math.round(height * this.renderScale));
-    canvas.style.setProperty("--oppopad-canvas-width", `${width}px`);
-    canvas.style.setProperty("--oppopad-canvas-height", `${height}px`);
-    if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
-      canvas.width = pixelWidth;
-      canvas.height = pixelHeight;
-      this.redraw();
+    stage.style.setProperty("--oppopad-stage-height", `${height}px`);
+    const tileCount = Math.max(1, Math.ceil(height / CANVAS_TILE_HEIGHT));
+    const lastTileHeight = height - (tileCount - 1) * CANVAS_TILE_HEIGHT;
+    const requiresRebuild =
+      this.canvasTiles.length !== tileCount ||
+      Math.abs((this.canvasTiles.at(-1)?.height ?? 0) - lastTileHeight) > 1;
+    if (requiresRebuild) {
+      for (const tile of this.canvasTiles) {
+        tile.canvas.remove();
+      }
+      this.canvasTiles = [];
+      const scale = Math.min(window.devicePixelRatio || 1, 2);
+      for (let index = 0; index < tileCount; index += 1) {
+        const top = index * CANVAS_TILE_HEIGHT;
+        const tileHeight = index === tileCount - 1 ? lastTileHeight : CANVAS_TILE_HEIGHT;
+        const canvas = stage.createEl("canvas", {
+          cls: "oppopad-ink-canvas",
+          attr: { "aria-hidden": "true" }
+        });
+        canvas.style.setProperty("--oppopad-canvas-width", `${LOGICAL_PAGE_WIDTH}px`);
+        canvas.style.setProperty("--oppopad-canvas-height", `${tileHeight}px`);
+        canvas.style.setProperty("--oppopad-canvas-top", `${top}px`);
+        canvas.width = Math.max(1, Math.round(LOGICAL_PAGE_WIDTH * scale));
+        canvas.height = Math.max(1, Math.round(tileHeight * scale));
+        this.canvasTiles.push({ canvas, height: tileHeight, top });
+      }
     }
+    this.redraw();
   }
 
   private redraw(): void {
-    const canvas = this.canvas;
-    if (!canvas) {
+    if (this.redrawFrame !== null) {
       return;
     }
-    const context = canvas.getContext("2d");
-    if (!context) {
-      return;
-    }
-    const width = canvas.clientWidth;
-    context.setTransform(this.renderScale, 0, 0, this.renderScale, 0, 0);
-    context.clearRect(0, 0, canvas.width / this.renderScale, canvas.height / this.renderScale);
-    for (const stroke of this.strokes) {
-      drawStroke(context, stroke, width);
-    }
-    if (this.currentStroke) {
-      drawStroke(context, this.currentStroke, width);
-    }
+    this.redrawFrame = window.requestAnimationFrame(() => {
+      this.redrawFrame = null;
+      const scale = Math.min(window.devicePixelRatio || 1, 2);
+      for (const tile of this.canvasTiles) {
+        const context = tile.canvas.getContext("2d");
+        if (!context) {
+          continue;
+        }
+        context.setTransform(scale, 0, 0, scale, 0, -tile.top * scale);
+        context.clearRect(0, tile.top, LOGICAL_PAGE_WIDTH, tile.height);
+        context.save();
+        context.beginPath();
+        context.rect(0, tile.top, LOGICAL_PAGE_WIDTH, tile.height);
+        context.clip();
+        for (const stroke of this.strokes) {
+          if (strokeIntersectsRange(stroke, tile.top, tile.top + tile.height)) {
+            drawStroke(context, stroke, LOGICAL_PAGE_WIDTH);
+          }
+        }
+        if (
+          this.currentStroke &&
+          strokeIntersectsRange(this.currentStroke, tile.top, tile.top + tile.height)
+        ) {
+          drawStroke(context, this.currentStroke, LOGICAL_PAGE_WIDTH);
+        }
+        context.restore();
+      }
+    });
   }
 
   private scheduleSave(): void {
@@ -930,6 +1090,15 @@ function strokeHitTest(
     const start = stroke.points[index - 1];
     const end = stroke.points[index];
     if (pointToSegmentDistance(x, y, start.x * width, start.y, end.x * width, end.y) <= radius) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function strokeIntersectsRange(stroke: InkStroke, top: number, bottom: number): boolean {
+  for (const point of stroke.points) {
+    if (point.y >= top - stroke.width && point.y <= bottom + stroke.width) {
       return true;
     }
   }

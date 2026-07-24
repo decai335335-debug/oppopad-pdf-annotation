@@ -87,16 +87,17 @@
   min-height: 0;
   overflow: auto;
   overscroll-behavior: none;
-  touch-action: none;
+  touch-action: pan-y;
 }
 
 .oppopad-annotation-stage {
   box-sizing: border-box;
+  margin: 0 auto;
   min-height: var(--oppopad-stage-height, 100%);
   position: relative;
-  touch-action: none;
+  touch-action: pan-y;
   transform-origin: left top;
-  width: 100%;
+  width: var(--oppopad-page-width, 1180px);
   zoom: var(--oppopad-zoom, 1);
 }
 
@@ -110,9 +111,10 @@
 
 .oppopad-ink-canvas {
   height: var(--oppopad-canvas-height);
-  inset: 0 auto auto 0;
+  left: 0;
   pointer-events: none;
   position: absolute;
+  top: var(--oppopad-canvas-top, 0);
   width: var(--oppopad-canvas-width);
   z-index: 2;
 }
