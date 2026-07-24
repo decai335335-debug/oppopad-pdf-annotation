@@ -74,7 +74,7 @@ export default class OppoPadMarkdownAnnotationPlugin extends Plugin {
         new Notice("Open a Markdown file first.");
         return;
       }
-      void this.openMarkdownAnnotation(file, this.app.workspace.getLeaf("split"));
+      void this.openMarkdownAnnotation(file, this.app.workspace.getLeaf(false));
     });
 
     this.registerEvent(
@@ -122,10 +122,12 @@ export default class OppoPadMarkdownAnnotationPlugin extends Plugin {
 
   private async openMarkdownAnnotation(file: TFile, leaf: WorkspaceLeaf): Promise<void> {
     for (const existingLeaf of this.app.workspace.getLeavesOfType(VIEW_TYPE)) {
-      const state = existingLeaf.view.getState() as AnnotationViewState;
-      if (state.file === file.path) {
-        await this.app.workspace.revealLeaf(existingLeaf);
-        return;
+      await this.app.workspace.revealLeaf(existingLeaf);
+      if (existingLeaf.view instanceof MarkdownAnnotationView) {
+        const state = existingLeaf.view.getState();
+        if (state.file === file.path) {
+          return;
+        }
       }
     }
 
@@ -147,6 +149,7 @@ class MarkdownAnnotationView extends ItemView {
   private markdownEl: HTMLElement | null = null;
   private renderGeneration = 0;
   private resizeObserver: ResizeObserver | null = null;
+  private renderScale = 1;
   private saveTimer: number | null = null;
   private scrollEl: HTMLElement | null = null;
   private stageEl: HTMLElement | null = null;
@@ -190,8 +193,9 @@ class MarkdownAnnotationView extends ItemView {
   }
 
   protected async onOpen(): Promise<void> {
-    this.contentEl.empty();
-    this.contentEl.addClass("oppopad-markdown-annotation-view");
+    try {
+      this.contentEl.empty();
+      this.contentEl.addClass("oppopad-markdown-annotation-view");
 
     this.toolbarEl = this.contentEl.createDiv({ cls: "oppopad-annotation-toolbar" });
     this.createToolbarButton("pen-line", "Pen", () => this.setTool("pen"), "pen");
@@ -215,9 +219,12 @@ class MarkdownAnnotationView extends ItemView {
     this.registerDomEvent(this.stageEl, "pointerup", (event) => this.onPointerUp(event), { capture: true });
     this.registerDomEvent(this.stageEl, "pointercancel", (event) => this.onPointerUp(event), { capture: true });
 
-    this.resizeObserver = new ResizeObserver(() => this.resizeCanvas());
-    this.resizeObserver.observe(this.stageEl);
-    this.register(() => this.resizeObserver?.disconnect());
+      if (typeof ResizeObserver !== "undefined") {
+        this.resizeObserver = new ResizeObserver(() => this.safeResizeCanvas());
+        this.resizeObserver.observe(this.scrollEl);
+        this.register(() => this.resizeObserver?.disconnect());
+      }
+      this.registerDomEvent(window, "resize", () => this.safeResizeCanvas());
 
     this.registerEvent(
       this.app.vault.on("modify", (file) => {
@@ -227,8 +234,12 @@ class MarkdownAnnotationView extends ItemView {
       })
     );
 
-    this.updateToolbarState();
-    await this.renderMarkdown();
+      this.updateToolbarState();
+      await this.renderMarkdown();
+    } catch (error) {
+      console.error("Could not initialize Markdown handwriting view.", error);
+      this.showViewError(error);
+    }
   }
 
   protected async onClose(): Promise<void> {
@@ -252,7 +263,7 @@ class MarkdownAnnotationView extends ItemView {
 
     if (!file) {
       this.markdownEl.createEl("p", { text: "Markdown file not found." });
-      this.resizeCanvas();
+      this.safeResizeCanvas();
       return;
     }
 
@@ -274,7 +285,7 @@ class MarkdownAnnotationView extends ItemView {
       if (generation !== this.renderGeneration) {
         return;
       }
-      window.requestAnimationFrame(() => this.resizeCanvas());
+      window.requestAnimationFrame(() => this.safeResizeCanvas());
     } catch (error) {
       console.error("Could not render Markdown handwriting view.", error);
       loading.remove();
@@ -524,7 +535,7 @@ class MarkdownAnnotationView extends ItemView {
   private setZoom(value: number): void {
     this.zoom = clamp(value, 0.6, 3);
     if (this.stageEl) {
-      this.stageEl.setCssProps({ "--oppopad-zoom": String(this.zoom) });
+      this.stageEl.style.setProperty("--oppopad-zoom", String(this.zoom));
     }
   }
 
@@ -537,6 +548,14 @@ class MarkdownAnnotationView extends ItemView {
     await this.leaf.openFile(file);
   }
 
+  private safeResizeCanvas(): void {
+    try {
+      this.resizeCanvas();
+    } catch (error) {
+      console.error("Could not resize Markdown handwriting canvas.", error);
+    }
+  }
+
   private resizeCanvas(): void {
     const canvas = this.canvas;
     const stage = this.stageEl;
@@ -546,17 +565,21 @@ class MarkdownAnnotationView extends ItemView {
     }
     const width = Math.max(1, stage.clientWidth);
     const height = Math.max(scroll.clientHeight, this.markdownEl?.scrollHeight ?? 0, 1);
-    stage.setCssProps({ "--oppopad-stage-height": `${height}px` });
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    const pixelWidth = Math.round(width * dpr);
-    const pixelHeight = Math.round(height * dpr);
+    stage.style.setProperty("--oppopad-stage-height", `${height}px`);
+    const maxCanvasDimension = 8192;
+    this.renderScale = Math.min(
+      window.devicePixelRatio || 1,
+      1.5,
+      maxCanvasDimension / width,
+      maxCanvasDimension / height
+    );
+    const pixelWidth = Math.max(1, Math.round(width * this.renderScale));
+    const pixelHeight = Math.max(1, Math.round(height * this.renderScale));
+    canvas.style.setProperty("--oppopad-canvas-width", `${width}px`);
+    canvas.style.setProperty("--oppopad-canvas-height", `${height}px`);
     if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
       canvas.width = pixelWidth;
       canvas.height = pixelHeight;
-      canvas.setCssProps({
-        "--oppopad-canvas-width": `${width}px`,
-        "--oppopad-canvas-height": `${height}px`,
-      });
       this.redraw();
     }
   }
@@ -570,10 +593,9 @@ class MarkdownAnnotationView extends ItemView {
     if (!context) {
       return;
     }
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
     const width = canvas.clientWidth;
-    context.setTransform(dpr, 0, 0, dpr, 0, 0);
-    context.clearRect(0, 0, canvas.width / dpr, canvas.height / dpr);
+    context.setTransform(this.renderScale, 0, 0, this.renderScale, 0, 0);
+    context.clearRect(0, 0, canvas.width / this.renderScale, canvas.height / this.renderScale);
     for (const stroke of this.strokes) {
       drawStroke(context, stroke, width);
     }
@@ -601,6 +623,19 @@ class MarkdownAnnotationView extends ItemView {
       this.saveTimer = null;
     }
     void this.plugin.saveAnnotations(this.filePath, this.strokes);
+  }
+
+  private showViewError(error: unknown): void {
+    this.contentEl.empty();
+    this.contentEl.addClass("oppopad-markdown-annotation-view");
+    const panel = this.contentEl.createDiv({ cls: "oppopad-view-error" });
+    panel.createEl("h3", { text: "Handwriting view could not start" });
+    panel.createEl("p", {
+      text: "Disable and enable the plugin once. If this message remains, report the diagnostic text below."
+    });
+    panel.createEl("pre", {
+      text: error instanceof Error ? `${error.name}: ${error.message}` : String(error)
+    });
   }
 }
 

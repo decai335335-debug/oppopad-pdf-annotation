@@ -77,6 +77,21 @@
   color: var(--text-error);
 }
 
+.oppopad-view-error {
+  margin: auto;
+  max-width: 680px;
+  overflow-wrap: anywhere;
+  padding: 24px;
+}
+
+.oppopad-view-error pre {
+  background: var(--background-secondary);
+  border-radius: var(--radius-s);
+  overflow: auto;
+  padding: 12px;
+  user-select: text;
+}
+
 @media (max-width: 600px) {
   .oppopad-annotation-toolbar {
     min-height: 48px;

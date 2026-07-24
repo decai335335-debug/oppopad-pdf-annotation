@@ -67,6 +67,8 @@ Licensed under the [MIT License](LICENSE).
 
 Version 1.0.0 was derived from Pdftion by Murat. Version 1.1.0 replaces the PDF implementation with a focused Markdown handwriting view maintained by [decai335335-debug](https://github.com/decai335335-debug).
 
+Version 1.1.1 hardens the Android view lifecycle, reuses the current Markdown tab on mobile, and caps canvas memory usage to prevent WebView crashes.
+
 ---
 
 ## 中文说明

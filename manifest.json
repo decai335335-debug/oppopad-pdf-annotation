@@ -1,7 +1,7 @@
 {
   "id": "oppopad-pdf-annotation",
   "name": "OPPO Pad Markdown Annotation",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "minAppVersion": "1.8.7",
   "description": "Render Markdown in a handwriting view with stylus ink, palm rejection, finger scrolling, pinch zoom, pressure, and tilt.",
   "author": "decai335335-debug",
