@@ -3,6 +3,7 @@
   flex-direction: column;
   height: 100%;
   overflow: hidden;
+  overscroll-behavior: none;
   padding: 0 !important;
 }
 
@@ -34,19 +35,66 @@
   color: var(--text-on-accent);
 }
 
+.oppopad-tool-controls {
+  align-items: center;
+  display: flex;
+  flex: 0 0 auto;
+  gap: 8px;
+}
+
+.oppopad-color-palette {
+  display: flex;
+  gap: 3px;
+}
+
+.oppopad-color-swatch {
+  background: var(--oppopad-swatch-color);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 50%;
+  height: 24px;
+  padding: 0;
+  width: 24px;
+}
+
+.oppopad-color-input {
+  background: transparent;
+  border: 0;
+  height: 28px;
+  padding: 0;
+  width: 30px;
+}
+
+.oppopad-slider-control {
+  align-items: center;
+  color: var(--text-muted);
+  display: flex;
+  font-size: var(--font-ui-smaller);
+  gap: 4px;
+  white-space: nowrap;
+}
+
+.oppopad-slider-control input {
+  width: 82px;
+}
+
+.oppopad-slider-value {
+  min-width: 34px;
+  text-align: right;
+}
+
 .oppopad-annotation-scroll {
   flex: 1 1 auto;
   min-height: 0;
   overflow: auto;
-  overscroll-behavior: contain;
-  touch-action: pan-x pan-y;
+  overscroll-behavior: none;
+  touch-action: none;
 }
 
 .oppopad-annotation-stage {
   box-sizing: border-box;
   min-height: var(--oppopad-stage-height, 100%);
   position: relative;
-  touch-action: pan-x pan-y;
+  touch-action: none;
   transform-origin: left top;
   width: 100%;
   zoom: var(--oppopad-zoom, 1);
@@ -100,5 +148,13 @@
   .oppopad-toolbar-button {
     height: 38px;
     width: 38px;
+  }
+
+  .oppopad-color-palette {
+    display: none;
+  }
+
+  .oppopad-slider-control input {
+    width: 70px;
   }
 }

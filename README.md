@@ -8,11 +8,13 @@ This is an independent community project and is not affiliated with, endorsed by
 
 - Opens `.md` files in a dedicated handwriting view.
 - Uses Obsidian's native `MarkdownRenderer`, including links, embeds, images, callouts, and themes.
-- Stylus input writes on the annotation layer.
-- One-finger touch scrolls the document without creating ink.
-- Two-finger pinch zooms the rendered Markdown and handwriting together.
+- Smooth fountain pen and translucent highlighter tools.
+- Adjustable color, stroke width, and opacity.
+- Stylus input writes or erases on the annotation layer.
+- One-finger touch pans the document without creating ink.
+- Two-finger touch pans and zooms the rendered Markdown and handwriting together.
 - Uses pressure, tilt, and high-frequency coalesced pointer samples when Android WebView exposes them.
-- Stylus side-button or reported double-click switches between pen and eraser.
+- Stylus side-button, reported double-click, or two quick pen-tip taps switches between pen and eraser.
 - Undo, clear, zoom, and return-to-Markdown toolbar actions.
 - Handwriting is saved locally per Markdown file and follows file renames.
 - No account, telemetry, advertising, or automatic network requests.
@@ -68,6 +70,8 @@ Licensed under the [MIT License](LICENSE).
 Version 1.0.0 was derived from Pdftion by Murat. Version 1.1.0 replaces the PDF implementation with a focused Markdown handwriting view maintained by [decai335335-debug](https://github.com/decai335335-debug).
 
 Version 1.1.1 hardens the Android view lifecycle, reuses the current Markdown tab on mobile, and caps canvas memory usage to prevent WebView crashes.
+
+Version 1.2.0 adds the pen/highlighter controls, smoother curves, manual touch pan/pinch handling, and stronger suppression of Obsidian's edge-pane gestures while writing.
 
 ---
 
