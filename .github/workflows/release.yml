@@ -71,4 +71,4 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
             --title "$GITHUB_REF_NAME" \
-            --notes "OPPO Pad PDF Annotation $GITHUB_REF_NAME release assets built and attested by GitHub Actions."
+            --notes "OPPO Pad Markdown Annotation $GITHUB_REF_NAME release assets built and attested by GitHub Actions."
