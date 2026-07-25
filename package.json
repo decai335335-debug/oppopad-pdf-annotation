@@ -1,7 +1,7 @@
 {
   "name": "oppopad-pdf-annotation",
-  "version": "1.6.0",
-  "description": "Stylus-first Markdown annotation for Obsidian on Android tablets.",
+  "version": "1.7.0",
+  "description": "Stylus-first Markdown and PDF annotation for Obsidian on Android tablets.",
   "main": "main.js",
   "scripts": {
     "build": "node esbuild.config.mjs production",

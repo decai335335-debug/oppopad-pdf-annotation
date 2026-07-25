@@ -1,39 +1,46 @@
-# OPPO Pad Markdown Annotation
+# OPPO Pad Document Annotation
 
-A stylus-first Markdown annotation view for Obsidian on Android tablets. It renders the real Markdown document first, then places a persistent handwriting layer over the rendered content.
+A stylus-first Markdown and PDF annotation plugin for Obsidian on Android tablets and desktop.
 
 This is an independent community project and is not affiliated with, endorsed by, or sponsored by OPPO.
 
 ## Features
 
-- Opens `.md` files in a dedicated handwriting view.
-- Uses Obsidian's native `MarkdownRenderer`, including links, embeds, images, callouts, and themes.
-- Smooth fountain pen and translucent highlighter tools.
-- Adjustable color, stroke width, and opacity.
-- Fixed landscape-width document layout, so rotation does not reflow Markdown underneath existing ink.
-- Stylus input writes or erases on the annotation layer.
-- One-finger touch pans the document without creating ink.
-- One-finger reading uses velocity-sampled kinetic scrolling while the drawing surface keeps full control of pen events.
-- Two-finger touch pans and zooms the rendered Markdown and handwriting together.
-- Uses pressure, tilt, and high-frequency coalesced pointer samples when Android WebView exposes them.
-- OPPO Pencil body double-tap switches between pen and eraser only when ColorOS exposes it as a stylus button event to Obsidian WebView.
-- Undo, clear, zoom, and return-to-Markdown toolbar actions.
-- Handwriting is saved per Markdown file in `OPPO Pad Annotations/annotations.json` inside the vault and follows file renames.
-- The same annotations load on desktop when that vault folder is synchronized.
+- Annotates rendered Markdown and Obsidian's native PDF reader.
+- Fountain pen and translucent highlighter with adjustable color, width, and opacity.
+- Pressure and high-frequency coalesced pointer samples when Android WebView exposes them.
+- OPPO Pencil body-button or double-tap switching when ColorOS reports it as a standard stylus event.
+- Finger and stylus inputs are separated:
+  - Stylus writes or erases.
+  - One-finger movement scrolls.
+  - One-finger long-press selects text and opens the system copy action.
+  - Two fingers pan and zoom.
+  - Desktop mouse drag continues to select and copy text.
+- Markdown uses a fixed 1180-pixel logical page; camera zoom never rewrites annotation coordinates.
+- PDF strokes are stored by file, page number, and normalized page coordinates, so they remain aligned at different display sizes.
+- Annotations are stored in `OPPO Pad Annotations/annotations.json` inside the vault and follow Markdown or PDF file renames.
+- The same annotations load on desktop when the vault is synchronized.
 - No account, telemetry, advertising, or automatic network requests.
 
-Hardware capabilities vary by tablet, stylus, ColorOS version, and Android WebView. The plugin cannot guarantee a specific sampling rate or native-app latency.
+Hardware capabilities vary by tablet, stylus, ColorOS version, and Android WebView. The plugin cannot guarantee a specific sampling rate, native-app latency, or access to proprietary OPPO Pencil Bluetooth events.
 
 ## Usage
 
+### Markdown
+
 1. Open a Markdown file.
-2. Use one of these entry points:
-   - Select the pen icon in the left ribbon.
-   - Run **Open current Markdown in handwriting view** from the command palette.
-   - Open the file menu and select **Open in handwriting view**.
-3. Write with the stylus.
-4. Scroll with one finger and pinch with two fingers.
-5. Select the document icon in the handwriting toolbar to return to the normal Markdown view.
+2. Select the pen ribbon icon, run **Open current Markdown in handwriting view**, or select **Open in handwriting view** from the file menu.
+3. Write with the stylus, move with one finger, pinch with two fingers, or long-press text with one finger to copy.
+4. Select the document icon to return to the normal Markdown view.
+
+### PDF
+
+1. Open a PDF in Obsidian's normal PDF reader.
+2. The compact handwriting toolbar appears in the PDF view.
+3. Use the stylus for pen, highlighter, or eraser.
+4. Long-press PDF text with one finger on a tablet, or drag with the mouse on desktop, to select and copy it.
+
+The plugin keeps the native PDF text layer intact. Its annotation canvases do not receive finger or mouse pointer events.
 
 ## Installation
 
@@ -42,7 +49,7 @@ Hardware capabilities vary by tablet, stylus, ColorOS version, and Android WebVi
 After review and publication:
 
 1. Open **Settings → Community plugins**.
-2. Search for **OPPO Pad Markdown Annotation**.
+2. Search for **OPPO Pad Document Annotation**.
 3. Install and enable it.
 
 ### Manual installation
@@ -56,7 +63,7 @@ Obsidian 1.8.7 or later is required.
 
 ## Privacy and storage
 
-Handwriting data is stored in `OPPO Pad Annotations/annotations.json` inside the vault, with a plugin-local backup. This makes the data available to the same plugin on other synchronized devices. Markdown content and annotations are not sent to an external service by the plugin. Removing a handwritten stroke does not modify the Markdown source text.
+Handwriting data is stored in `OPPO Pad Annotations/annotations.json` inside the vault, with a plugin-local backup. Markdown, PDF content, and annotations are not sent to an external service. Annotations are overlays and do not modify the source Markdown or PDF file.
 
 ## Development
 
@@ -70,30 +77,21 @@ npm run build
 
 Licensed under the [MIT License](LICENSE).
 
-Version 1.0.0 was derived from Pdftion by Murat. Version 1.1.0 replaces the PDF implementation with a focused Markdown handwriting view maintained by [decai335335-debug](https://github.com/decai335335-debug).
-
 The handwriting outline renderer uses [`perfect-freehand`](https://github.com/steveruizok/perfect-freehand). See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
-Version 1.1.1 hardens the Android view lifecycle, reuses the current Markdown tab on mobile, and caps canvas memory usage to prevent WebView crashes.
-
-Version 1.2.0 adds the pen/highlighter controls, smoother curves, manual touch pan/pinch handling, and stronger suppression of Obsidian's edge-pane gestures while writing.
-
-Version 1.3.0 adds a fixed landscape-width layout, vault-synced annotation storage, tiled high-resolution canvases, frame-batched drawing, and automatic sidebar closing during pen/touch gestures.
-
-Version 1.4.0 replaces the custom line renderer with the MIT-licensed `perfect-freehand` outline engine used by established Obsidian drawing plugins, removes pen-tip double-tap switching, and adds kinetic touch scrolling without allowing the browser to cancel pen strokes.
-
-Version 1.5.0 renders the in-progress stroke in a dedicated live SVG layer and commits it to the tiled canvas only on pen-up. It also reduces tip lag, preserves the final pressure on pen lift, rejects cancelled fragments, and avoids sidebar work during every pen sample.
-
-Version 1.6.0 locks Markdown and ink to a 1180-pixel logical page with a stable minimum height and fixed text metrics. Pinch zoom is now a camera-only CSS transform, so zoom, orientation, and device viewport size never rewrite annotation coordinates. Touch pan and inertia also operate in screen pixels for consistent motion at every zoom level.
+Version 1.7.0 adds synchronized PDF handwriting on top of Obsidian's native selectable PDF text layer. It also changes Markdown touch handling so a finger long-press remains available for native text selection and copying, while movement becomes scrolling and two fingers remain pan/zoom.
 
 ---
 
 ## 中文说明
 
-这个插件用于给 Markdown 文件做手写标注，不是 PDF 批注工具。
+这是一个面向 OPPO Pad、Android 平板和电脑端 Obsidian 的 Markdown／PDF 手写标注插件。
 
-- 先使用 Obsidian 原生渲染器加载真正的 Markdown 内容，再叠加手写层。
-- 横竖屏使用相同的横屏逻辑页面宽度，避免旋转后正文重排和笔迹错位。
-- 手写笔负责书写，单指负责平移，双指负责缩放和平移。
-- 支持压感、倾斜、高频采样，以及系统能够上报时的笔身双击切换橡皮。
-- 每个 Markdown 文件的笔迹保存在仓库内的 `OPPO Pad Annotations/annotations.json`，同步到电脑后可由同一插件读取，不会修改 Markdown 源文字。
+- Markdown 与 PDF 都支持钢笔、荧光笔和橡皮。
+- 手写笔只负责书写和擦除，不会触发文字长按选择。
+- 平板上用一根手指静止长按文字，可继续使用系统选择和复制。
+- 一根手指移动时滚动页面，两根手指缩放和平移。
+- 电脑端鼠标仍可拖选 Markdown 或 PDF 文字并复制。
+- PDF 使用 Obsidian 原生文字层，标注画布不接收手指或鼠标事件。
+- PDF 笔迹按文件、页码和页内归一化坐标保存，不同设备显示尺寸不同也不会偏移。
+- 所有笔迹保存在仓库内的 `OPPO Pad Annotations/annotations.json`，可随仓库同步到电脑和平板。

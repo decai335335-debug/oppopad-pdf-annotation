@@ -1,9 +1,9 @@
 {
   "id": "oppopad-pdf-annotation",
-  "name": "OPPO Pad Markdown Annotation",
-  "version": "1.6.0",
+  "name": "OPPO Pad Document Annotation",
+  "version": "1.7.0",
   "minAppVersion": "1.8.7",
-  "description": "Synced Markdown handwriting on a fixed logical page, with camera-only pinch zoom, live vector ink, highlighter, pressure, colors, width, and opacity.",
+  "description": "Synced stylus annotation for Markdown and selectable PDFs, with pen, highlighter, pressure, finger pan and pinch zoom.",
   "author": "decai335335-debug",
   "authorUrl": "https://github.com/decai335335-debug",
   "isDesktopOnly": false

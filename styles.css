@@ -140,6 +140,80 @@
   z-index: 3;
 }
 
+.oppopad-markdown-content,
+.oppopad-markdown-content * {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.oppopad-pdf-root {
+  position: relative;
+}
+
+.oppopad-pdf-toolbar {
+  align-items: center;
+  backdrop-filter: blur(12px);
+  background: color-mix(in srgb, var(--background-primary) 90%, transparent);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-m);
+  box-shadow: var(--shadow-s);
+  display: flex;
+  gap: 4px;
+  max-width: calc(100% - 24px);
+  overflow-x: auto;
+  padding: 5px;
+  position: absolute;
+  right: 12px;
+  top: 48px;
+  z-index: 100;
+}
+
+.oppopad-pdf-tool-button.is-active {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+}
+
+.oppopad-pdf-color {
+  background: transparent;
+  border: 0;
+  height: 28px;
+  padding: 0;
+  width: 30px;
+}
+
+.oppopad-pdf-width,
+.oppopad-pdf-opacity {
+  width: 76px;
+}
+
+.oppopad-pdf-selection-hint {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  padding: 0 4px;
+  white-space: nowrap;
+}
+
+.oppopad-pdf-page {
+  position: relative;
+}
+
+.oppopad-pdf-ink-canvas,
+.oppopad-pdf-live-canvas {
+  height: 100%;
+  inset: 0;
+  pointer-events: none;
+  position: absolute;
+  width: 100%;
+  z-index: 5;
+}
+
+.oppopad-pdf-page .textLayer,
+.oppopad-pdf-page .textLayer * {
+  pointer-events: auto;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
 .oppopad-loading {
   color: var(--text-muted);
 }

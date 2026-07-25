@@ -1,5 +1,6 @@
 import {
   Component,
+  FileView,
   ItemView,
   MarkdownRenderer,
   Notice,
@@ -13,7 +14,7 @@ import { getStroke } from "perfect-freehand";
 import type { ViewStateResult } from "obsidian";
 
 const VIEW_TYPE = "oppopad-markdown-annotation";
-const DATA_VERSION = 2;
+const DATA_VERSION = 3;
 const SYNC_FOLDER = "OPPO Pad Annotations";
 const SYNC_FILE = `${SYNC_FOLDER}/annotations.json`;
 const SAVE_DELAY_MS = 350;
@@ -36,6 +37,8 @@ interface InkStroke {
   color: string;
   id: string;
   opacity: number;
+  page?: number;
+  pageWidth?: number;
   points: InkPoint[];
   tool: DrawingTool;
   width: number;
@@ -86,12 +89,26 @@ export default class OppoPadMarkdownAnnotationPlugin extends Plugin {
     preferences: clonePreferences(DEFAULT_PREFERENCES)
   };
   private saveQueue: Promise<void> = Promise.resolve();
+  private pdfScanTimer: number | null = null;
+  private pdfSessions = new Map<HTMLElement, PdfAnnotationSession>();
 
   async onload(): Promise<void> {
     const legacyData = normalizePluginData(await this.loadData());
     this.data = await this.loadSyncedData(legacyData);
 
     this.registerView(VIEW_TYPE, (leaf) => new MarkdownAnnotationView(leaf, this));
+    this.registerEvent(this.app.workspace.on("active-leaf-change", () => this.queuePdfScan()));
+    this.registerEvent(this.app.workspace.on("layout-change", () => this.queuePdfScan()));
+    this.registerEvent(this.app.workspace.on("file-open", () => this.queuePdfScan()));
+    this.register(() => {
+      if (this.pdfScanTimer !== null) {
+        window.clearTimeout(this.pdfScanTimer);
+      }
+      for (const session of this.pdfSessions.values()) {
+        session.destroy();
+      }
+      this.pdfSessions.clear();
+    });
 
     this.addCommand({
       id: "open-current-markdown-in-handwriting-view",
@@ -110,30 +127,42 @@ export default class OppoPadMarkdownAnnotationPlugin extends Plugin {
 
     this.addRibbonIcon("pen-line", "Open Markdown handwriting view", () => {
       const file = this.app.workspace.getActiveFile();
-      if (!(file instanceof TFile) || file.extension !== "md") {
-        new Notice("Open a Markdown file first.");
+      if (!(file instanceof TFile) || !["md", "pdf"].includes(file.extension)) {
+        new Notice("Open a Markdown or PDF file first.");
         return;
       }
-      void this.openMarkdownAnnotation(file, this.app.workspace.getLeaf(false));
+      if (file.extension === "pdf") {
+        this.queuePdfScan(0);
+        new Notice("PDF handwriting tools are ready in the PDF view.");
+      } else {
+        void this.openMarkdownAnnotation(file, this.app.workspace.getLeaf(false));
+      }
     });
 
     this.registerEvent(
       this.app.workspace.on("file-menu", (menu, file, _source, leaf) => {
-        if (!(file instanceof TFile) || file.extension !== "md") {
+        if (!(file instanceof TFile) || !["md", "pdf"].includes(file.extension)) {
           return;
         }
         menu.addItem((item) => {
           item
             .setTitle("Open in handwriting view")
             .setIcon("pen-line")
-            .onClick(() => void this.openMarkdownAnnotation(file, leaf ?? this.app.workspace.getLeaf("tab")));
+            .onClick(() => {
+              if (file.extension === "pdf") {
+                const targetLeaf = leaf ?? this.app.workspace.getLeaf("tab");
+                void targetLeaf.openFile(file).then(() => this.queuePdfScan(0));
+              } else {
+                void this.openMarkdownAnnotation(file, leaf ?? this.app.workspace.getLeaf("tab"));
+              }
+            });
         });
       })
     );
 
     this.registerEvent(
       this.app.vault.on("rename", (file, oldPath) => {
-        if (!(file instanceof TFile) || file.extension !== "md") {
+        if (!(file instanceof TFile) || !["md", "pdf"].includes(file.extension)) {
           return;
         }
         const annotations = this.data.annotations[oldPath];
@@ -145,6 +174,7 @@ export default class OppoPadMarkdownAnnotationPlugin extends Plugin {
         void this.persistData();
       })
     );
+    this.queuePdfScan(0);
   }
 
   getAnnotations(filePath: string): InkStroke[] {
@@ -167,6 +197,41 @@ export default class OppoPadMarkdownAnnotationPlugin extends Plugin {
   async savePreferences(preferences: ToolPreferences): Promise<void> {
     this.data.preferences = clonePreferences(preferences);
     await this.persistData();
+  }
+
+  queuePdfScan(delay = 180): void {
+    if (this.pdfScanTimer !== null) {
+      window.clearTimeout(this.pdfScanTimer);
+    }
+    this.pdfScanTimer = window.setTimeout(() => {
+      this.pdfScanTimer = null;
+      this.scanPdfViews();
+    }, delay);
+  }
+
+  private scanPdfViews(): void {
+    const activeRoots = new Set<HTMLElement>();
+    for (const leaf of this.app.workspace.getLeavesOfType("pdf")) {
+      const view = leaf.view;
+      if (!(view instanceof FileView) || !(view.file instanceof TFile) || view.file.extension !== "pdf") {
+        continue;
+      }
+      const root = view.containerEl;
+      activeRoots.add(root);
+      const existing = this.pdfSessions.get(root);
+      if (existing?.filePath === view.file.path) {
+        existing.scanPages();
+        continue;
+      }
+      existing?.destroy();
+      this.pdfSessions.set(root, new PdfAnnotationSession(this, view.file, root));
+    }
+    for (const [root, session] of this.pdfSessions.entries()) {
+      if (!activeRoots.has(root) || !root.isConnected) {
+        session.destroy();
+        this.pdfSessions.delete(root);
+      }
+    }
   }
 
   private async loadSyncedData(fallback: PluginData): Promise<PluginData> {
@@ -271,8 +336,10 @@ class MarkdownAnnotationView extends ItemView {
   private tool: InkTool = "pen";
   private toolbarEl: HTMLElement | null = null;
   private trackedTouches = new Map<number, { x: number; y: number }>();
+  private touchGestureActive = false;
   private touchInertiaFrame: number | null = null;
   private touchLastAt = 0;
+  private touchStartPositions = new Map<number, { x: number; y: number }>();
   private touchVelocity = { x: 0, y: 0 };
   private fitZoom = 1;
   private zoom = 1;
@@ -374,23 +441,6 @@ class MarkdownAnnotationView extends ItemView {
         this.toggleFromStylusHardware();
       }
     }, { capture: true });
-    const suppressSidebarTouchGesture = (event: TouchEvent): void => {
-      event.preventDefault();
-      event.stopImmediatePropagation();
-    };
-    this.registerDomEvent(this.stageEl, "touchstart", suppressSidebarTouchGesture, {
-      capture: true,
-      passive: false
-    });
-    this.registerDomEvent(this.stageEl, "touchmove", suppressSidebarTouchGesture, {
-      capture: true,
-      passive: false
-    });
-    this.registerDomEvent(this.stageEl, "touchend", suppressSidebarTouchGesture, {
-      capture: true,
-      passive: false
-    });
-
       if (typeof ResizeObserver !== "undefined") {
         this.resizeObserver = new ResizeObserver(() => this.safeResizeCanvas());
         this.resizeObserver.observe(this.scrollEl);
@@ -649,15 +699,13 @@ class MarkdownAnnotationView extends ItemView {
 
   private onPointerDown(event: PointerEvent): void {
     if (event.pointerType === "touch") {
-      this.keepSidebarsClosed();
       this.stopTouchInertia();
-      event.preventDefault();
-      event.stopImmediatePropagation();
       this.trackedTouches.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      this.touchStartPositions.set(event.pointerId, { x: event.clientX, y: event.clientY });
       this.touchLastAt = performance.now();
       this.touchVelocity = { x: 0, y: 0 };
-      for (const pointerId of this.trackedTouches.keys()) {
-        this.stageEl?.setPointerCapture(pointerId);
+      if (this.trackedTouches.size >= 2) {
+        this.beginTouchGesture(event);
       }
       return;
     }
@@ -700,10 +748,23 @@ class MarkdownAnnotationView extends ItemView {
       if (!this.trackedTouches.has(event.pointerId)) {
         return;
       }
-      event.preventDefault();
-      event.stopImmediatePropagation();
       const before = new Map(this.trackedTouches);
       this.trackedTouches.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      if (!this.touchGestureActive) {
+        const start = this.touchStartPositions.get(event.pointerId);
+        const moved = start ? Math.hypot(event.clientX - start.x, event.clientY - start.y) : 0;
+        const selection = this.contentEl.ownerDocument.getSelection();
+        if (selection && !selection.isCollapsed) {
+          return;
+        }
+        if (this.trackedTouches.size < 2 && moved < 8) {
+          return;
+        }
+        this.beginTouchGesture(event);
+      } else {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+      }
       if (this.trackedTouches.size === 1) {
         const previous = before.get(event.pointerId);
         if (previous && this.scrollEl) {
@@ -763,18 +824,25 @@ class MarkdownAnnotationView extends ItemView {
 
   private onPointerUp(event: PointerEvent): void {
     if (event.pointerType === "touch") {
-      event.preventDefault();
-      event.stopImmediatePropagation();
+      const gestureWasActive = this.touchGestureActive;
+      if (gestureWasActive) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+      }
       const wasSingleTouch = this.trackedTouches.size === 1;
       this.trackedTouches.delete(event.pointerId);
+      this.touchStartPositions.delete(event.pointerId);
       if (this.stageEl?.hasPointerCapture(event.pointerId)) {
         this.stageEl.releasePointerCapture(event.pointerId);
       }
-      if (wasSingleTouch && this.trackedTouches.size === 0) {
+      if (gestureWasActive && wasSingleTouch && this.trackedTouches.size === 0) {
         this.startTouchInertia();
       } else if (this.trackedTouches.size === 1) {
         this.touchLastAt = performance.now();
         this.touchVelocity = { x: 0, y: 0 };
+      }
+      if (this.trackedTouches.size === 0) {
+        this.touchGestureActive = false;
       }
       return;
     }
@@ -814,7 +882,11 @@ class MarkdownAnnotationView extends ItemView {
     }
     if (event.pointerType === "touch") {
       this.trackedTouches.delete(event.pointerId);
+      this.touchStartPositions.delete(event.pointerId);
       this.touchVelocity = { x: 0, y: 0 };
+      if (this.trackedTouches.size === 0) {
+        this.touchGestureActive = false;
+      }
       return;
     }
     if (event.pointerType === "pen") {
@@ -1041,6 +1113,17 @@ class MarkdownAnnotationView extends ItemView {
     this.applyZoom();
   }
 
+  private beginTouchGesture(event: PointerEvent): void {
+    this.touchGestureActive = true;
+    this.keepSidebarsClosed();
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    for (const pointerId of this.trackedTouches.keys()) {
+      this.stageEl?.setPointerCapture(pointerId);
+    }
+    this.contentEl.ownerDocument.getSelection()?.removeAllRanges();
+  }
+
   private setZoomAround(value: number, focalPoint: { x: number; y: number }): void {
     const stage = this.stageEl;
     const scroll = this.scrollEl;
@@ -1207,6 +1290,497 @@ class MarkdownAnnotationView extends ItemView {
   }
 }
 
+interface PdfPageOverlay {
+  canvas: HTMLCanvasElement;
+  cleanup?: () => void;
+  liveCanvas: HTMLCanvasElement;
+  pageEl: HTMLElement;
+  pageIndex: number;
+  redrawFrame: number | null;
+  resizeObserver: ResizeObserver | null;
+}
+
+class PdfAnnotationSession {
+  readonly filePath: string;
+  private currentOverlay: PdfPageOverlay | null = null;
+  private currentPointerId: number | null = null;
+  private currentStroke: InkStroke | null = null;
+  private destroyed = false;
+  private mutationObserver: MutationObserver;
+  private overlays = new Map<HTMLElement, PdfPageOverlay>();
+  private preferences: ToolPreferences;
+  private saveTimer: number | null = null;
+  private stylusButtonPressed = false;
+  private strokes: InkStroke[];
+  private tool: InkTool = "pen";
+  private toolbarEl: HTMLElement;
+
+  constructor(
+    private readonly plugin: OppoPadMarkdownAnnotationPlugin,
+    private readonly file: TFile,
+    private readonly rootEl: HTMLElement
+  ) {
+    this.filePath = file.path;
+    this.preferences = plugin.getPreferences();
+    this.strokes = plugin.getAnnotations(file.path);
+    this.rootEl.addClass("oppopad-pdf-root");
+    this.toolbarEl = this.createToolbar();
+    this.updateToolbar();
+    this.mutationObserver = new MutationObserver(() => this.scanPages());
+    this.mutationObserver.observe(rootEl, { childList: true, subtree: true });
+    this.scanPages();
+  }
+
+  destroy(): void {
+    if (this.destroyed) {
+      return;
+    }
+    this.destroyed = true;
+    this.mutationObserver.disconnect();
+    if (this.saveTimer !== null) {
+      window.clearTimeout(this.saveTimer);
+      this.saveTimer = null;
+      void this.plugin.saveAnnotations(this.file.path, this.strokes);
+    }
+    for (const overlay of this.overlays.values()) {
+      this.destroyOverlay(overlay);
+    }
+    this.overlays.clear();
+    this.toolbarEl.remove();
+    this.rootEl.removeClass("oppopad-pdf-root");
+  }
+
+  scanPages(): void {
+    if (this.destroyed) {
+      return;
+    }
+    const pages = Array.from(
+      this.rootEl.querySelectorAll<HTMLElement>(
+        ".pdfViewer .page[data-page-number], .pdf-viewer .page[data-page-number], .pdf-container .page[data-page-number], .page[data-page-number]"
+      )
+    );
+    for (const [fallbackIndex, pageEl] of pages.entries()) {
+      if (this.overlays.has(pageEl)) {
+        continue;
+      }
+      const pageNumber = Number(pageEl.dataset.pageNumber);
+      const pageIndex = Number.isFinite(pageNumber) && pageNumber > 0 ? pageNumber - 1 : fallbackIndex;
+      this.overlays.set(pageEl, this.createOverlay(pageEl, pageIndex));
+    }
+    for (const [pageEl, overlay] of this.overlays.entries()) {
+      if (!pageEl.isConnected || !this.rootEl.contains(pageEl)) {
+        this.destroyOverlay(overlay);
+        this.overlays.delete(pageEl);
+      }
+    }
+  }
+
+  private createToolbar(): HTMLElement {
+    const toolbar = this.rootEl.createDiv({
+      cls: "oppopad-pdf-toolbar",
+      attr: { "aria-label": "PDF handwriting tools" }
+    });
+    const addToolButton = (icon: string, label: string, tool: InkTool): void => {
+      const button = toolbar.createEl("button", {
+        cls: "clickable-icon oppopad-pdf-tool-button",
+        attr: { "aria-label": label, "data-tool": tool, type: "button" },
+        title: label
+      });
+      setIcon(button, icon);
+      button.addEventListener("click", () => {
+        this.tool = tool;
+        this.currentStroke = null;
+        this.clearLiveCanvas();
+        this.updateToolbar();
+      });
+    };
+    addToolButton("pen-line", "Pen", "pen");
+    addToolButton("highlighter", "Highlighter", "highlighter");
+    addToolButton("eraser", "Eraser", "eraser");
+
+    const color = toolbar.createEl("input", {
+      cls: "oppopad-pdf-color",
+      attr: { "aria-label": "Ink color" },
+      type: "color"
+    });
+    color.addEventListener("input", () => {
+      const drawingTool = this.getDrawingTool();
+      this.preferences[drawingTool].color = color.value;
+      this.updateToolbar();
+    });
+    color.addEventListener("change", () => void this.plugin.savePreferences(this.preferences));
+
+    const width = toolbar.createEl("input", {
+      cls: "oppopad-pdf-width",
+      attr: { "aria-label": "Ink width", max: "40", min: "1", step: "0.5" },
+      type: "range"
+    });
+    width.addEventListener("input", () => {
+      this.preferences[this.getDrawingTool()].width = Number(width.value);
+    });
+    width.addEventListener("change", () => void this.plugin.savePreferences(this.preferences));
+
+    const opacity = toolbar.createEl("input", {
+      cls: "oppopad-pdf-opacity",
+      attr: { "aria-label": "Ink opacity", max: "100", min: "5", step: "1" },
+      type: "range"
+    });
+    opacity.addEventListener("input", () => {
+      this.preferences[this.getDrawingTool()].opacity = Number(opacity.value) / 100;
+    });
+    opacity.addEventListener("change", () => void this.plugin.savePreferences(this.preferences));
+
+    const undo = toolbar.createEl("button", {
+      cls: "clickable-icon",
+      attr: { "aria-label": "Undo PDF stroke", type: "button" },
+      title: "Undo PDF stroke"
+    });
+    setIcon(undo, "undo-2");
+    undo.addEventListener("click", () => {
+      if (this.strokes.pop()) {
+        this.scheduleSave();
+        this.redrawAll();
+      }
+    });
+    toolbar.createSpan({
+      cls: "oppopad-pdf-selection-hint",
+      text: "Long-press or drag text to copy"
+    });
+    return toolbar;
+  }
+
+  private updateToolbar(): void {
+    for (const button of Array.from(this.toolbarEl.querySelectorAll<HTMLElement>("[data-tool]"))) {
+      button.classList.toggle("is-active", button.dataset.tool === this.tool);
+    }
+    const style = this.preferences[this.getDrawingTool()];
+    const color = this.toolbarEl.querySelector<HTMLInputElement>(".oppopad-pdf-color");
+    const width = this.toolbarEl.querySelector<HTMLInputElement>(".oppopad-pdf-width");
+    const opacity = this.toolbarEl.querySelector<HTMLInputElement>(".oppopad-pdf-opacity");
+    if (color) {
+      color.value = style.color;
+      color.disabled = this.tool === "eraser";
+    }
+    if (width) {
+      width.value = String(style.width);
+      width.disabled = this.tool === "eraser";
+    }
+    if (opacity) {
+      opacity.value = String(Math.round(style.opacity * 100));
+      opacity.disabled = this.tool === "eraser";
+    }
+  }
+
+  private createOverlay(pageEl: HTMLElement, pageIndex: number): PdfPageOverlay {
+    pageEl.addClass("oppopad-pdf-page");
+    const canvas = pageEl.createEl("canvas", {
+      cls: "oppopad-pdf-ink-canvas",
+      attr: { "aria-hidden": "true" }
+    });
+    const liveCanvas = pageEl.createEl("canvas", {
+      cls: "oppopad-pdf-live-canvas",
+      attr: { "aria-hidden": "true" }
+    });
+    const overlay: PdfPageOverlay = {
+      canvas,
+      liveCanvas,
+      pageEl,
+      pageIndex,
+      redrawFrame: null,
+      resizeObserver: null
+    };
+    const pointerDown = (event: PointerEvent): void => this.onPointerDown(event, overlay);
+    const pointerMove = (event: PointerEvent): void => this.onPointerMove(event, overlay);
+    const pointerUp = (event: PointerEvent): void => this.onPointerUp(event, overlay);
+    const pointerCancel = (event: PointerEvent): void => this.onPointerCancel(event, overlay);
+    pageEl.addEventListener("pointerdown", pointerDown, { capture: true });
+    pageEl.addEventListener("pointermove", pointerMove, { capture: true });
+    pageEl.addEventListener("pointerup", pointerUp, { capture: true });
+    pageEl.addEventListener("pointercancel", pointerCancel, { capture: true });
+    const cleanup = (): void => {
+      pageEl.removeEventListener("pointerdown", pointerDown, { capture: true });
+      pageEl.removeEventListener("pointermove", pointerMove, { capture: true });
+      pageEl.removeEventListener("pointerup", pointerUp, { capture: true });
+      pageEl.removeEventListener("pointercancel", pointerCancel, { capture: true });
+    };
+    overlay.cleanup = cleanup;
+    if (typeof ResizeObserver !== "undefined") {
+      overlay.resizeObserver = new ResizeObserver(() => this.resizeOverlay(overlay));
+      overlay.resizeObserver.observe(pageEl);
+    }
+    this.resizeOverlay(overlay);
+    return overlay;
+  }
+
+  private destroyOverlay(overlay: PdfPageOverlay): void {
+    if (overlay.redrawFrame !== null) {
+      window.cancelAnimationFrame(overlay.redrawFrame);
+    }
+    overlay.resizeObserver?.disconnect();
+    overlay.cleanup?.();
+    overlay.canvas.remove();
+    overlay.liveCanvas.remove();
+    overlay.pageEl.removeClass("oppopad-pdf-page");
+  }
+
+  private resizeOverlay(overlay: PdfPageOverlay): void {
+    const width = Math.max(1, overlay.pageEl.clientWidth);
+    const height = Math.max(1, overlay.pageEl.clientHeight);
+    const scale = Math.min(window.devicePixelRatio || 1, 2);
+    for (const canvas of [overlay.canvas, overlay.liveCanvas]) {
+      const pixelWidth = Math.max(1, Math.round(width * scale));
+      const pixelHeight = Math.max(1, Math.round(height * scale));
+      if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
+        canvas.width = pixelWidth;
+        canvas.height = pixelHeight;
+      }
+    }
+    this.redrawOverlay(overlay);
+  }
+
+  private onPointerDown(event: PointerEvent, overlay: PdfPageOverlay): void {
+    if (event.pointerType !== "pen") {
+      return;
+    }
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    if (this.handleStylusButton(event)) {
+      return;
+    }
+    overlay.pageEl.setPointerCapture(event.pointerId);
+    this.currentPointerId = event.pointerId;
+    this.currentOverlay = overlay;
+    const point = this.getPoint(event, overlay);
+    if (this.tool === "eraser") {
+      this.eraseAt(point, overlay);
+      return;
+    }
+    const drawingTool = this.getDrawingTool();
+    const style = this.preferences[drawingTool];
+    this.currentStroke = {
+      color: style.color,
+      id: makeStrokeId(),
+      opacity: style.opacity,
+      page: overlay.pageIndex,
+      pageWidth: Math.max(1, overlay.pageEl.clientWidth),
+      points: [point],
+      tool: drawingTool,
+      width: style.width
+    };
+    this.redrawLive(overlay);
+  }
+
+  private onPointerMove(event: PointerEvent, overlay: PdfPageOverlay): void {
+    if (event.pointerType !== "pen" || event.pointerId !== this.currentPointerId) {
+      return;
+    }
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    if (this.handleStylusButton(event)) {
+      return;
+    }
+    if (this.tool === "eraser") {
+      this.eraseAt(this.getPoint(event, overlay), overlay);
+      return;
+    }
+    if (!this.currentStroke || this.currentOverlay !== overlay) {
+      return;
+    }
+    const coalesced = typeof event.getCoalescedEvents === "function" ? event.getCoalescedEvents() : [];
+    const samples = coalesced.length > 0 ? [...coalesced, event] : [event];
+    for (const sample of samples) {
+      this.appendPoint(this.getPoint(sample, overlay), overlay);
+    }
+    this.redrawLive(overlay);
+  }
+
+  private onPointerUp(event: PointerEvent, overlay: PdfPageOverlay): void {
+    if (event.pointerType !== "pen" || event.pointerId !== this.currentPointerId) {
+      return;
+    }
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    if (overlay.pageEl.hasPointerCapture(event.pointerId)) {
+      overlay.pageEl.releasePointerCapture(event.pointerId);
+    }
+    const stroke = this.currentStroke;
+    this.stylusButtonPressed = false;
+    if (stroke && this.currentOverlay === overlay) {
+      const point = this.getPoint(event, overlay);
+      const previous = stroke.points.at(-1);
+      if (previous) {
+        point.pressure = point.pressure ?? previous.pressure;
+      }
+      stroke.points.push(point);
+      if (stroke.points.length === 1) {
+        stroke.points.push({ ...stroke.points[0] });
+      }
+      this.strokes.push(stroke);
+      this.scheduleSave();
+      this.redrawOverlay(overlay);
+    }
+    this.clearPointerState();
+  }
+
+  private onPointerCancel(event: PointerEvent, overlay: PdfPageOverlay): void {
+    if (event.pointerType !== "pen" || event.pointerId !== this.currentPointerId) {
+      return;
+    }
+    event.preventDefault();
+    if (overlay.pageEl.hasPointerCapture(event.pointerId)) {
+      overlay.pageEl.releasePointerCapture(event.pointerId);
+    }
+    this.clearPointerState();
+  }
+
+  private handleStylusButton(event: PointerEvent): boolean {
+    const pressed = isStylusButtonEvent(event);
+    if (!pressed) {
+      this.stylusButtonPressed = false;
+      return false;
+    }
+    if (!this.stylusButtonPressed) {
+      this.stylusButtonPressed = true;
+      this.togglePenEraser();
+    }
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    return true;
+  }
+
+  private getPoint(event: PointerEvent, overlay: PdfPageOverlay): InkPoint {
+    const rect = overlay.pageEl.getBoundingClientRect();
+    return {
+      pressure: event.pressure > 0.01 ? clamp(event.pressure * 1.15, 0.12, 1) : undefined,
+      tiltX: clamp(event.tiltX, -90, 90),
+      tiltY: clamp(event.tiltY, -90, 90),
+      x: clamp((event.clientX - rect.left) / Math.max(1, rect.width), 0, 1),
+      y: clamp((event.clientY - rect.top) / Math.max(1, rect.height), 0, 1)
+    };
+  }
+
+  private appendPoint(point: InkPoint, overlay: PdfPageOverlay): void {
+    const stroke = this.currentStroke;
+    if (!stroke) {
+      return;
+    }
+    const previous = stroke.points.at(-1);
+    if (!previous) {
+      stroke.points.push(point);
+      return;
+    }
+    const width = Math.max(1, overlay.pageEl.clientWidth);
+    const height = Math.max(1, overlay.pageEl.clientHeight);
+    const distance = Math.hypot((point.x - previous.x) * width, (point.y - previous.y) * height);
+    if (distance < 0.45) {
+      previous.pressure = Math.max(previous.pressure ?? 0, point.pressure ?? 0);
+      return;
+    }
+    const rawPressure = point.pressure ?? previous.pressure ?? 0.5;
+    const previousPressure = previous.pressure ?? rawPressure;
+    const smoothedPressure = previousPressure + (rawPressure - previousPressure) * 0.38;
+    const maximumChange = Math.max(0.025, (distance / Math.max(stroke.width, 0.5)) * 0.28);
+    stroke.points.push({
+      ...point,
+      pressure: clamp(smoothedPressure, previousPressure - maximumChange, previousPressure + maximumChange)
+    });
+  }
+
+  private eraseAt(point: InkPoint, overlay: PdfPageOverlay): void {
+    const width = Math.max(1, overlay.pageEl.clientWidth);
+    const height = Math.max(1, overlay.pageEl.clientHeight);
+    const before = this.strokes.length;
+    this.strokes = this.strokes.filter(
+      (stroke) =>
+        stroke.page !== overlay.pageIndex ||
+        !pdfStrokeHitTest(stroke, point.x * width, point.y * height, width, height, 16)
+    );
+    if (this.strokes.length !== before) {
+      this.scheduleSave();
+      this.redrawOverlay(overlay);
+    }
+  }
+
+  private redrawAll(): void {
+    for (const overlay of this.overlays.values()) {
+      this.redrawOverlay(overlay);
+    }
+  }
+
+  private redrawOverlay(overlay: PdfPageOverlay): void {
+    if (overlay.redrawFrame !== null) {
+      return;
+    }
+    overlay.redrawFrame = window.requestAnimationFrame(() => {
+      overlay.redrawFrame = null;
+      const width = Math.max(1, overlay.pageEl.clientWidth);
+      const height = Math.max(1, overlay.pageEl.clientHeight);
+      const scale = Math.min(window.devicePixelRatio || 1, 2);
+      const context = overlay.canvas.getContext("2d");
+      if (!context) {
+        return;
+      }
+      context.setTransform(scale, 0, 0, scale, 0, 0);
+      context.clearRect(0, 0, width, height);
+      for (const stroke of this.strokes) {
+        if (stroke.page === overlay.pageIndex) {
+          drawPdfStroke(context, stroke, width, height);
+        }
+      }
+    });
+  }
+
+  private redrawLive(overlay: PdfPageOverlay): void {
+    const width = Math.max(1, overlay.pageEl.clientWidth);
+    const height = Math.max(1, overlay.pageEl.clientHeight);
+    const scale = Math.min(window.devicePixelRatio || 1, 2);
+    const context = overlay.liveCanvas.getContext("2d");
+    if (!context) {
+      return;
+    }
+    context.setTransform(scale, 0, 0, scale, 0, 0);
+    context.clearRect(0, 0, width, height);
+    if (this.currentStroke && this.currentOverlay === overlay) {
+      drawPdfStroke(context, this.currentStroke, width, height);
+    }
+  }
+
+  private clearLiveCanvas(): void {
+    for (const overlay of this.overlays.values()) {
+      const context = overlay.liveCanvas.getContext("2d");
+      context?.clearRect(0, 0, overlay.liveCanvas.width, overlay.liveCanvas.height);
+    }
+  }
+
+  private clearPointerState(): void {
+    this.currentStroke = null;
+    this.currentPointerId = null;
+    this.currentOverlay = null;
+    this.clearLiveCanvas();
+  }
+
+  private getDrawingTool(): DrawingTool {
+    return this.tool === "highlighter" ? "highlighter" : "pen";
+  }
+
+  private togglePenEraser(): void {
+    this.tool = this.tool === "eraser" ? "pen" : "eraser";
+    this.clearPointerState();
+    this.updateToolbar();
+    new Notice(this.tool === "eraser" ? "橡皮" : "钢笔", 700);
+  }
+
+  private scheduleSave(): void {
+    if (this.saveTimer !== null) {
+      window.clearTimeout(this.saveTimer);
+    }
+    this.saveTimer = window.setTimeout(() => {
+      this.saveTimer = null;
+      void this.plugin.saveAnnotations(this.file.path, this.strokes);
+    }, SAVE_DELAY_MS);
+  }
+}
+
 function drawStroke(context: CanvasRenderingContext2D, stroke: InkStroke, width: number): void {
   const outline = getStrokeOutline(stroke, width);
   if (outline.length < 3) {
@@ -1230,6 +1804,94 @@ function drawStroke(context: CanvasRenderingContext2D, stroke: InkStroke, width:
   context.closePath();
   context.fill();
   context.restore();
+}
+
+function drawPdfStroke(
+  context: CanvasRenderingContext2D,
+  stroke: InkStroke,
+  width: number,
+  height: number
+): void {
+  if (stroke.points.length === 0) {
+    return;
+  }
+  const size = stroke.width * (width / Math.max(1, stroke.pageWidth ?? width));
+  const outline = getStroke(
+    stroke.points.map((point) => ({
+      pressure: point.pressure ?? 0.5,
+      x: point.x * width,
+      y: point.y * height
+    })),
+    {
+      end: { cap: true, taper: 0 },
+      last: true,
+      simulatePressure: false,
+      size,
+      smoothing: stroke.tool === "highlighter" ? 0.62 : 0.58,
+      start: { cap: true, taper: 0 },
+      streamline: stroke.tool === "highlighter" ? 0.28 : 0.18,
+      thinning: stroke.tool === "highlighter" ? 0 : 0.58
+    }
+  );
+  if (outline.length < 3) {
+    return;
+  }
+  context.save();
+  context.fillStyle = stroke.color;
+  context.globalAlpha = stroke.opacity;
+  context.beginPath();
+  context.moveTo(outline[0][0], outline[0][1]);
+  for (let index = 1; index < outline.length - 1; index += 1) {
+    const point = outline[index];
+    const next = outline[index + 1];
+    context.quadraticCurveTo(
+      point[0],
+      point[1],
+      (point[0] + next[0]) / 2,
+      (point[1] + next[1]) / 2
+    );
+  }
+  context.closePath();
+  context.fill();
+  context.restore();
+}
+
+function pdfStrokeHitTest(
+  stroke: InkStroke,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  radius: number
+): boolean {
+  for (let index = 1; index < stroke.points.length; index += 1) {
+    const start = stroke.points[index - 1];
+    const end = stroke.points[index];
+    if (
+      pointToSegmentDistance(
+        x,
+        y,
+        start.x * width,
+        start.y * height,
+        end.x * width,
+        end.y * height
+      ) <= radius
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function isStylusButtonEvent(event: PointerEvent): boolean {
+  return (
+    event.button === 2 ||
+    event.button === 5 ||
+    event.button === 6 ||
+    (event.buttons & 2) !== 0 ||
+    (event.buttons & 32) !== 0 ||
+    (event.buttons & 64) !== 0
+  );
 }
 
 function getStrokeOutline(stroke: InkStroke, width: number): number[][] {
