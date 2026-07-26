@@ -318,6 +318,7 @@ class MarkdownAnnotationView extends ItemView {
   private liveStrokeSvg: SVGSVGElement | null = null;
   private colorInput: HTMLInputElement | null = null;
   private filePath = "";
+  private mediaObserver: MutationObserver | null = null;
   private markdownComponent: Component | null = null;
   private markdownEl: HTMLElement | null = null;
   private renderGeneration = 0;
@@ -444,6 +445,7 @@ class MarkdownAnnotationView extends ItemView {
       if (typeof ResizeObserver !== "undefined") {
         this.resizeObserver = new ResizeObserver(() => this.safeResizeCanvas());
         this.resizeObserver.observe(this.scrollEl);
+        this.resizeObserver.observe(this.markdownEl);
         this.register(() => this.resizeObserver?.disconnect());
       }
       this.registerDomEvent(window, "resize", () => this.safeResizeCanvas());
@@ -466,6 +468,8 @@ class MarkdownAnnotationView extends ItemView {
 
   protected async onClose(): Promise<void> {
     this.flushSave();
+    this.mediaObserver?.disconnect();
+    this.mediaObserver = null;
     this.unloadMarkdownComponent();
     if (this.redrawFrame !== null) {
       window.cancelAnimationFrame(this.redrawFrame);
@@ -520,6 +524,7 @@ class MarkdownAnnotationView extends ItemView {
       if (generation !== this.renderGeneration) {
         return;
       }
+      this.observeRenderedMedia(generation, component);
       window.requestAnimationFrame(() => this.safeResizeCanvas());
     } catch (error) {
       console.error("Could not render Markdown handwriting view.", error);
@@ -532,11 +537,57 @@ class MarkdownAnnotationView extends ItemView {
   }
 
   private unloadMarkdownComponent(): void {
+    this.mediaObserver?.disconnect();
+    this.mediaObserver = null;
     if (!this.markdownComponent) {
       return;
     }
     this.removeChild(this.markdownComponent);
     this.markdownComponent = null;
+  }
+
+  private observeRenderedMedia(generation: number, component: Component): void {
+    const markdownEl = this.markdownEl;
+    if (!markdownEl) {
+      return;
+    }
+    this.mediaObserver?.disconnect();
+    const observedImages = new WeakSet<HTMLImageElement>();
+    const resizeAfterMedia = (): void => {
+      if (generation === this.renderGeneration) {
+        window.requestAnimationFrame(() => this.safeResizeCanvas());
+      }
+    };
+    const prepareImages = (): void => {
+      for (const image of Array.from(markdownEl.querySelectorAll<HTMLImageElement>("img"))) {
+        if (observedImages.has(image)) {
+          continue;
+        }
+        observedImages.add(image);
+        image.loading = "eager";
+        image.decoding = "async";
+        component.registerDomEvent(image, "load", resizeAfterMedia);
+        component.registerDomEvent(image, "error", resizeAfterMedia);
+        if (image.complete) {
+          if (typeof image.decode === "function") {
+            void image.decode().then(resizeAfterMedia, resizeAfterMedia);
+          } else {
+            resizeAfterMedia();
+          }
+        }
+      }
+    };
+    prepareImages();
+    this.mediaObserver = new MutationObserver(() => {
+      prepareImages();
+      resizeAfterMedia();
+    });
+    this.mediaObserver.observe(markdownEl, {
+      attributes: true,
+      attributeFilter: ["src", "srcset"],
+      childList: true,
+      subtree: true
+    });
   }
 
   private getMarkdownFile(): TFile | null {

@@ -119,6 +119,11 @@
   z-index: 1;
 }
 
+.oppopad-markdown-content img {
+  height: auto;
+  max-width: 100%;
+}
+
 .oppopad-ink-canvas {
   height: var(--oppopad-canvas-height);
   left: 0;
