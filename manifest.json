@@ -1,7 +1,7 @@
 {
   "id": "oppopad-pdf-annotation",
   "name": "OPPO Pad Document Annotation",
-  "version": "1.7.2",
+  "version": "1.7.3",
   "minAppVersion": "1.8.7",
   "description": "Synced stylus annotation for Markdown and selectable PDFs, with pen, highlighter, pressure, finger pan and pinch zoom.",
   "author": "decai335335-debug",
