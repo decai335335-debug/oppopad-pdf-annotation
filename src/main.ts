@@ -309,6 +309,71 @@ export default class OppoPadMarkdownAnnotationPlugin extends Plugin {
   }
 }
 
+class SidebarGestureGuard {
+  private closeFrame: number | null = null;
+  private closeUntil = 0;
+
+  private readonly onPointerEvent = (event: PointerEvent): void => {
+    this.hold();
+    event.stopPropagation();
+  };
+
+  private readonly onTouchEvent = (event: TouchEvent): void => {
+    this.hold();
+    event.stopPropagation();
+  };
+
+  constructor(
+    private readonly plugin: OppoPadMarkdownAnnotationPlugin,
+    private readonly rootEl: HTMLElement
+  ) {}
+
+  start(): void {
+    for (const type of ["pointerdown", "pointermove", "pointerup", "pointercancel"] as const) {
+      this.rootEl.addEventListener(type, this.onPointerEvent, { passive: true });
+    }
+    for (const type of ["touchstart", "touchmove", "touchend", "touchcancel"] as const) {
+      this.rootEl.addEventListener(type, this.onTouchEvent, { passive: true });
+    }
+    this.hold(320);
+  }
+
+  hold(duration = 180): void {
+    this.closeUntil = Math.max(this.closeUntil, performance.now() + duration);
+    this.collapse();
+    if (this.closeFrame !== null) {
+      return;
+    }
+    const keepClosed = (): void => {
+      this.collapse();
+      if (performance.now() < this.closeUntil) {
+        this.closeFrame = window.requestAnimationFrame(keepClosed);
+      } else {
+        this.closeFrame = null;
+      }
+    };
+    this.closeFrame = window.requestAnimationFrame(keepClosed);
+  }
+
+  destroy(): void {
+    for (const type of ["pointerdown", "pointermove", "pointerup", "pointercancel"] as const) {
+      this.rootEl.removeEventListener(type, this.onPointerEvent);
+    }
+    for (const type of ["touchstart", "touchmove", "touchend", "touchcancel"] as const) {
+      this.rootEl.removeEventListener(type, this.onTouchEvent);
+    }
+    if (this.closeFrame !== null) {
+      window.cancelAnimationFrame(this.closeFrame);
+      this.closeFrame = null;
+    }
+  }
+
+  private collapse(): void {
+    this.plugin.app.workspace.leftSplit.collapse();
+    this.plugin.app.workspace.rightSplit.collapse();
+  }
+}
+
 class MarkdownAnnotationView extends ItemView {
   private canvasTiles: CanvasTile[] = [];
   private clearConfirmUntil = 0;
@@ -325,7 +390,7 @@ class MarkdownAnnotationView extends ItemView {
   private resizeObserver: ResizeObserver | null = null;
   private saveTimer: number | null = null;
   private scrollEl: HTMLElement | null = null;
-  private sidebarCloseFrame: number | null = null;
+  private sidebarGuard: SidebarGestureGuard | null = null;
   private stageHeight = 1;
   private stageEl: HTMLElement | null = null;
   private surfaceEl: HTMLElement | null = null;
@@ -408,6 +473,8 @@ class MarkdownAnnotationView extends ItemView {
     this.scrollEl = this.contentEl.createDiv({ cls: "oppopad-annotation-scroll" });
     this.surfaceEl = this.scrollEl.createDiv({ cls: "oppopad-annotation-surface" });
     this.stageEl = this.surfaceEl.createDiv({ cls: "oppopad-annotation-stage" });
+    this.sidebarGuard = new SidebarGestureGuard(this.plugin, this.contentEl);
+    this.sidebarGuard.start();
     this.stageEl.style.setProperty("--oppopad-page-width", `${LOGICAL_PAGE_WIDTH}px`);
     this.markdownEl = this.stageEl.createDiv({ cls: "markdown-preview-view markdown-rendered oppopad-markdown-content" });
     this.liveStrokeSvg = this.stageEl.createSvg("svg", {
@@ -475,10 +542,8 @@ class MarkdownAnnotationView extends ItemView {
       window.cancelAnimationFrame(this.liveStrokeFrame);
       this.liveStrokeFrame = null;
     }
-    if (this.sidebarCloseFrame !== null) {
-      window.cancelAnimationFrame(this.sidebarCloseFrame);
-      this.sidebarCloseFrame = null;
-    }
+    this.sidebarGuard?.destroy();
+    this.sidebarGuard = null;
     this.stopTouchInertia();
     if (this.saveTimer !== null) {
       window.clearTimeout(this.saveTimer);
@@ -699,6 +764,7 @@ class MarkdownAnnotationView extends ItemView {
 
   private onPointerDown(event: PointerEvent): void {
     if (event.pointerType === "touch") {
+      this.sidebarGuard?.hold();
       this.stopTouchInertia();
       this.trackedTouches.set(event.pointerId, { x: event.clientX, y: event.clientY });
       this.touchStartPositions.set(event.pointerId, { x: event.clientX, y: event.clientY });
@@ -715,7 +781,7 @@ class MarkdownAnnotationView extends ItemView {
     }
 
     this.lastPenActivityAt = performance.now();
-    this.keepSidebarsClosed();
+    this.sidebarGuard?.hold();
     event.preventDefault();
     event.stopImmediatePropagation();
 
@@ -745,6 +811,7 @@ class MarkdownAnnotationView extends ItemView {
 
   private onPointerMove(event: PointerEvent): void {
     if (event.pointerType === "touch") {
+      this.sidebarGuard?.hold();
       if (!this.trackedTouches.has(event.pointerId)) {
         return;
       }
@@ -798,6 +865,7 @@ class MarkdownAnnotationView extends ItemView {
     }
 
     this.lastPenActivityAt = performance.now();
+    this.sidebarGuard?.hold();
     event.preventDefault();
     event.stopImmediatePropagation();
     if (this.handleStylusButton(event)) {
@@ -824,6 +892,7 @@ class MarkdownAnnotationView extends ItemView {
 
   private onPointerUp(event: PointerEvent): void {
     if (event.pointerType === "touch") {
+      this.sidebarGuard?.hold(260);
       const gestureWasActive = this.touchGestureActive;
       if (gestureWasActive) {
         event.preventDefault();
@@ -851,6 +920,7 @@ class MarkdownAnnotationView extends ItemView {
       return;
     }
 
+    this.sidebarGuard?.hold(260);
     event.preventDefault();
     event.stopImmediatePropagation();
     if (this.stageEl?.hasPointerCapture(event.pointerId)) {
@@ -875,6 +945,7 @@ class MarkdownAnnotationView extends ItemView {
   }
 
   private onPointerCancel(event: PointerEvent): void {
+    this.sidebarGuard?.hold(260);
     event.preventDefault();
     event.stopImmediatePropagation();
     if (this.stageEl?.hasPointerCapture(event.pointerId)) {
@@ -929,19 +1000,6 @@ class MarkdownAnnotationView extends ItemView {
     }
     this.lastStylusToggleAt = now;
     this.togglePenEraser();
-  }
-
-  private keepSidebarsClosed(): void {
-    this.app.workspace.leftSplit.collapse();
-    this.app.workspace.rightSplit.collapse();
-    if (this.sidebarCloseFrame !== null) {
-      return;
-    }
-    this.sidebarCloseFrame = window.requestAnimationFrame(() => {
-      this.sidebarCloseFrame = null;
-      this.app.workspace.leftSplit.collapse();
-      this.app.workspace.rightSplit.collapse();
-    });
   }
 
   private stopTouchInertia(): void {
@@ -1115,7 +1173,7 @@ class MarkdownAnnotationView extends ItemView {
 
   private beginTouchGesture(event: PointerEvent): void {
     this.touchGestureActive = true;
-    this.keepSidebarsClosed();
+    this.sidebarGuard?.hold();
     event.preventDefault();
     event.stopImmediatePropagation();
     for (const pointerId of this.trackedTouches.keys()) {
@@ -1310,6 +1368,7 @@ class PdfAnnotationSession {
   private overlays = new Map<HTMLElement, PdfPageOverlay>();
   private preferences: ToolPreferences;
   private saveTimer: number | null = null;
+  private sidebarGuard: SidebarGestureGuard;
   private stylusButtonPressed = false;
   private strokes: InkStroke[];
   private tool: InkTool = "pen";
@@ -1324,6 +1383,8 @@ class PdfAnnotationSession {
     this.preferences = plugin.getPreferences();
     this.strokes = plugin.getAnnotations(file.path);
     this.rootEl.addClass("oppopad-pdf-root");
+    this.sidebarGuard = new SidebarGestureGuard(plugin, rootEl);
+    this.sidebarGuard.start();
     this.toolbarEl = this.createToolbar();
     this.updateToolbar();
     this.mutationObserver = new MutationObserver(() => this.scanPages());
@@ -1337,6 +1398,7 @@ class PdfAnnotationSession {
     }
     this.destroyed = true;
     this.mutationObserver.disconnect();
+    this.sidebarGuard.destroy();
     if (this.saveTimer !== null) {
       window.clearTimeout(this.saveTimer);
       this.saveTimer = null;
@@ -1539,6 +1601,7 @@ class PdfAnnotationSession {
   }
 
   private onPointerDown(event: PointerEvent, overlay: PdfPageOverlay): void {
+    this.sidebarGuard.hold();
     if (event.pointerType !== "pen") {
       return;
     }
@@ -1571,6 +1634,7 @@ class PdfAnnotationSession {
   }
 
   private onPointerMove(event: PointerEvent, overlay: PdfPageOverlay): void {
+    this.sidebarGuard.hold();
     if (event.pointerType !== "pen" || event.pointerId !== this.currentPointerId) {
       return;
     }
@@ -1595,6 +1659,7 @@ class PdfAnnotationSession {
   }
 
   private onPointerUp(event: PointerEvent, overlay: PdfPageOverlay): void {
+    this.sidebarGuard.hold(260);
     if (event.pointerType !== "pen" || event.pointerId !== this.currentPointerId) {
       return;
     }
@@ -1623,6 +1688,7 @@ class PdfAnnotationSession {
   }
 
   private onPointerCancel(event: PointerEvent, overlay: PdfPageOverlay): void {
+    this.sidebarGuard.hold(260);
     if (event.pointerType !== "pen" || event.pointerId !== this.currentPointerId) {
       return;
     }
