@@ -310,6 +310,7 @@ export default class OppoPadMarkdownAnnotationPlugin extends Plugin {
 }
 
 class MarkdownAnnotationView extends ItemView {
+  private activePenPointerId: number | null = null;
   private canvasTiles: CanvasTile[] = [];
   private clearConfirmUntil = 0;
   private currentStroke: InkStroke | null = null;
@@ -421,6 +422,10 @@ class MarkdownAnnotationView extends ItemView {
     });
     this.liveStrokePath = this.liveStrokeSvg.createSvg("path");
 
+    this.registerDomEvent(window, "pointerdown", (event) => this.capturePenPointer(event), { capture: true });
+    this.registerDomEvent(window, "pointermove", (event) => this.capturePenPointer(event), { capture: true });
+    this.registerDomEvent(window, "pointerup", (event) => this.capturePenPointer(event), { capture: true });
+    this.registerDomEvent(window, "pointercancel", (event) => this.capturePenPointer(event), { capture: true });
     this.registerDomEvent(this.stageEl, "pointerdown", (event) => this.onPointerDown(event), { capture: true });
     this.registerDomEvent(this.stageEl, "pointermove", (event) => this.onPointerMove(event), { capture: true });
     this.registerDomEvent(this.stageEl, "pointerup", (event) => this.onPointerUp(event), { capture: true });
@@ -794,6 +799,36 @@ class MarkdownAnnotationView extends ItemView {
     this.scheduleLiveStroke();
   }
 
+  private capturePenPointer(event: PointerEvent): void {
+    if (event.pointerType !== "pen") {
+      return;
+    }
+    if (event.type === "pointerdown") {
+      const stage = this.stageEl;
+      if (!stage || !event.composedPath().includes(stage)) {
+        return;
+      }
+      this.activePenPointerId = event.pointerId;
+      this.onPointerDown(event);
+      return;
+    }
+    if (event.pointerId !== this.activePenPointerId) {
+      return;
+    }
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    this.keepSidebarsClosed();
+    if (event.type === "pointermove") {
+      this.onPointerMove(event);
+    } else if (event.type === "pointerup") {
+      this.onPointerUp(event);
+      this.activePenPointerId = null;
+    } else if (event.type === "pointercancel") {
+      this.onPointerCancel(event);
+      this.activePenPointerId = null;
+    }
+  }
+
   private onPointerMove(event: PointerEvent): void {
     if (event.pointerType === "touch") {
       if (!this.trackedTouches.has(event.pointerId)) {
@@ -983,15 +1018,24 @@ class MarkdownAnnotationView extends ItemView {
   }
 
   private keepSidebarsClosed(): void {
-    this.app.workspace.leftSplit.collapse();
-    this.app.workspace.rightSplit.collapse();
+    const { leftSplit, rightSplit } = this.app.workspace;
+    if (!leftSplit.collapsed) {
+      leftSplit.collapse();
+    }
+    if (!rightSplit.collapsed) {
+      rightSplit.collapse();
+    }
     if (this.sidebarCloseFrame !== null) {
       return;
     }
     this.sidebarCloseFrame = window.requestAnimationFrame(() => {
       this.sidebarCloseFrame = null;
-      this.app.workspace.leftSplit.collapse();
-      this.app.workspace.rightSplit.collapse();
+      if (!leftSplit.collapsed) {
+        leftSplit.collapse();
+      }
+      if (!rightSplit.collapsed) {
+        rightSplit.collapse();
+      }
     });
   }
 
@@ -1365,6 +1409,44 @@ class PdfAnnotationSession {
   private strokes: InkStroke[];
   private tool: InkTool = "pen";
   private toolbarEl: HTMLElement;
+  private readonly capturePenPointer = (event: PointerEvent): void => {
+    if (event.pointerType !== "pen") {
+      return;
+    }
+    if (event.type === "pointerdown") {
+      const path = event.composedPath();
+      const overlay = Array.from(this.overlays.values()).find((candidate) => path.includes(candidate.pageEl));
+      if (overlay) {
+        this.keepSidebarsClosed();
+        this.onPointerDown(event, overlay);
+      }
+      return;
+    }
+    const overlay = this.currentOverlay;
+    if (!overlay || event.pointerId !== this.currentPointerId) {
+      return;
+    }
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    this.keepSidebarsClosed();
+    if (event.type === "pointermove") {
+      this.onPointerMove(event, overlay);
+    } else if (event.type === "pointerup") {
+      this.onPointerUp(event, overlay);
+    } else if (event.type === "pointercancel") {
+      this.onPointerCancel(event, overlay);
+    }
+  };
+
+  private keepSidebarsClosed(): void {
+    const { leftSplit, rightSplit } = this.plugin.app.workspace;
+    if (!leftSplit.collapsed) {
+      leftSplit.collapse();
+    }
+    if (!rightSplit.collapsed) {
+      rightSplit.collapse();
+    }
+  }
 
   constructor(
     private readonly plugin: OppoPadMarkdownAnnotationPlugin,
@@ -1377,6 +1459,9 @@ class PdfAnnotationSession {
     this.rootEl.addClass("oppopad-pdf-root");
     this.toolbarEl = this.createToolbar();
     this.updateToolbar();
+    for (const type of ["pointerdown", "pointermove", "pointerup", "pointercancel"] as const) {
+      window.addEventListener(type, this.capturePenPointer, { capture: true });
+    }
     this.mutationObserver = new MutationObserver(() => this.scanPages());
     this.mutationObserver.observe(rootEl, { childList: true, subtree: true });
     this.scanPages();
@@ -1388,6 +1473,9 @@ class PdfAnnotationSession {
     }
     this.destroyed = true;
     this.mutationObserver.disconnect();
+    for (const type of ["pointerdown", "pointermove", "pointerup", "pointercancel"] as const) {
+      window.removeEventListener(type, this.capturePenPointer, { capture: true });
+    }
     if (this.saveTimer !== null) {
       window.clearTimeout(this.saveTimer);
       this.saveTimer = null;
